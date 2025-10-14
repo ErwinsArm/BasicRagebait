@@ -56,6 +56,7 @@ export default {
         const init = {
             method: request.method,
             headers,
+            proxy: "http://6273eb4f4c8aa0f545d5__cr.vn:b084c9fd9e440267@gw.dataimpulse.com:823"
         };
 
         if (request.method !== "GET" && request.method !== "HEAD") {
