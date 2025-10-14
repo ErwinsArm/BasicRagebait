@@ -41,6 +41,10 @@ const proxyAgent = new HttpsProxyAgent("http://6273eb4f4c8aa0f545d5__cr.vn:b084c
 
 app.use(express.text({ type: "*/*" }));
 
+app.get("/", (req, res) => {
+    res.json({ status: "ok", message: "Proxy is running" });
+});
+
 app.all("/:subdomain/*", async (req, res) => {
     const { subdomain } = req.params;
     const path = req.params[0];
@@ -72,8 +76,15 @@ app.all("/:subdomain/*", async (req, res) => {
     try {
         const response = await fetch(`https://${subdomain}.roblox.com/${path}${req.url.includes("?") ? req.url.substring(req.url.indexOf("?")) : ""}`, init);
         const body = await response.text();
-        res.status(response.status).set(Object.fromEntries(response.headers)).send(body);
+        console.log(`[${subdomain}] Status: ${response.status}, Body length: ${body.length}`);
+
+        const responseHeaders = Object.fromEntries(response.headers);
+        delete responseHeaders['content-encoding'];
+        delete responseHeaders['transfer-encoding'];
+
+        res.status(response.status).set(responseHeaders).send(body);
     } catch (error) {
+        console.error("Proxy error:", error);
         res.status(500).json({ message: "Proxy request failed", error: error.message });
     }
 });
