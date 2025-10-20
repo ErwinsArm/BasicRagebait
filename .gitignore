@@ -3,3 +3,9 @@ node_modules/
 
 bun.lock
 package-lock.json
+
+# Local automation assets and smoke tests
+other stuff/
+tests/
+
+STATE.txt
