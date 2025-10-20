@@ -37,7 +37,7 @@ const domains = [
     "users"
 ];
 
-const proxyAgent = new HttpsProxyAgent("http://6273eb4f4c8aa0f545d5__cr.vn:b084c9fd9e440267@gw.dataimpulse.com:823");
+const proxyAgent = new HttpsProxyAgent("6273eb4f4c8aa0f545d5__cr.mx:b084c9fd9e440267@gw.dataimpulse.com:823");
 
 app.use(express.text({ type: "*/*" }));
 
