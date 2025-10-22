@@ -123,6 +123,14 @@ const requestRobloxServerPage = async (placeId, cursor) => {
     });
 
     if (!response.ok) {
+        const bodySnippet = await response.text().catch(() => "<unable to read body>");
+        console.error(`[Roblox] Server fetch failed`, {
+            placeId,
+            cursor,
+            status: response.status,
+            statusText: response.statusText,
+            bodySnippet: bodySnippet.slice(0, 300)
+        });
         throw new Error(`Roblox server fetch failed with status ${response.status}`);
     }
 
@@ -132,13 +140,24 @@ const requestRobloxServerPage = async (placeId, cursor) => {
 const filterServerRecords = (servers, seenJobIds) => {
     const filtered = [];
     const sessionSeen = new Set();
+    const stats = {
+        total: 0,
+        invalid: 0,
+        duplicate: 0,
+        lowPlayers: 0,
+        full: 0
+    };
 
     for (const server of servers) {
+        stats.total += 1;
+
         if (!server || typeof server.id !== "string") {
+            stats.invalid += 1;
             continue;
         }
 
         if (seenJobIds.has(server.id) || sessionSeen.has(server.id)) {
+            stats.duplicate += 1;
             continue;
         }
 
@@ -146,10 +165,12 @@ const filterServerRecords = (servers, seenJobIds) => {
         const maxPlayers = typeof server.maxPlayers === "number" ? server.maxPlayers : null;
 
         if (playing !== null && playing < JOB_MIN_PLAYERS) {
+            stats.lowPlayers += 1;
             continue;
         }
 
         if (maxPlayers !== null && playing !== null && playing >= maxPlayers) {
+            stats.full += 1;
             continue;
         }
 
@@ -158,7 +179,7 @@ const filterServerRecords = (servers, seenJobIds) => {
         seenJobIds.add(server.id);
     }
 
-    return filtered;
+    return { filtered, stats };
 };
 
 const buildJobRecord = (server) => ({
@@ -211,7 +232,7 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
                 pages += 1;
 
                 const rawServers = Array.isArray(payload?.data) ? payload.data : [];
-                const filtered = filterServerRecords(rawServers, seenJobIds);
+                const { filtered, stats } = filterServerRecords(rawServers, seenJobIds);
                 if (filtered.length) {
                     const jobs = shuffle(filtered.map(buildJobRecord));
                     const slotsRemaining = Math.max(0, JOB_POOL_TARGET - entry.jobs.length);
@@ -222,6 +243,11 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
                             entry.jobIds.add(job.jobId);
                         }
                     }
+                } else {
+                    console.warn(`[JobPool] Roblox page yielded zero eligible servers during top-up`, {
+                        placeId,
+                        stats
+                    });
                 }
 
                 cursor = payload?.nextPageCursor ?? null;
@@ -246,15 +272,22 @@ const primeJobPool = async (placeId) => {
     const servers = [];
     let cursor = null;
     let pages = 0;
+    let lastStats = null;
 
     while (pages < JOB_FETCH_MAX_PAGES && servers.length < JOB_POOL_TARGET) {
         const payload = await requestRobloxServerPage(placeId, cursor ?? undefined);
         pages += 1;
 
         const rawServers = Array.isArray(payload?.data) ? payload.data : [];
-        const filtered = filterServerRecords(rawServers, seenJobIds);
+        const { filtered, stats } = filterServerRecords(rawServers, seenJobIds);
+        lastStats = stats;
         if (filtered.length) {
             servers.push(...filtered);
+        } else {
+            console.warn(`[JobPool] Roblox page yielded zero eligible servers during prime`, {
+                placeId,
+                stats
+            });
         }
 
         cursor = payload?.nextPageCursor ?? null;
@@ -264,6 +297,9 @@ const primeJobPool = async (placeId) => {
     }
 
     if (!servers.length) {
+        console.error(`[JobPool] Failed to prime pool for place ${placeId}; no eligible servers after ${pages} pages.`, {
+            lastStats
+        });
         throw new Error("No eligible servers returned by Roblox");
     }
 
@@ -368,7 +404,12 @@ app.get("/jobs/next", async (req, res) => {
         });
     } catch (error) {
         console.error("Job reservation error:", error);
-        return res.status(502).json({ message: "Failed to load Roblox servers.", error: "roblox_fetch_failed" });
+        const message = error instanceof Error ? error.message : String(error);
+        const noServers = typeof message === "string" && message.includes("No eligible servers");
+        return res.status(noServers ? 503 : 502).json({
+            message,
+            error: noServers ? "no_servers_available" : "roblox_fetch_failed"
+        });
     }
 });
 
