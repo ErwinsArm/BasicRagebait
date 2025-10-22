@@ -37,7 +37,12 @@ const domains = [
     "users"
 ];
 
-const proxyAgent = new HttpsProxyAgent("http://6273eb4f4c8aa0f545d5__cr.mx:b084c9fd9e440267@gw.dataimpulse.com:823");
+const PROXY_URL = process.env.PROXY_URL;
+if (!PROXY_URL) {
+    throw new Error("PROXY_URL environment variable is required for outbound Roblox requests.");
+}
+
+const proxyAgent = new HttpsProxyAgent(PROXY_URL);
 
 const toPositiveInteger = (value, fallback) => {
     const parsed = Number.parseInt(value, 10);
