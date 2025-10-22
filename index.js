@@ -3,7 +3,16 @@ import fetch from "node-fetch";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+
+const rawPort = process.env.PORT;
+if (!rawPort) {
+    throw new Error("PORT environment variable is required.");
+}
+const parsedPort = Number.parseInt(rawPort, 10);
+if (Number.isNaN(parsedPort) || parsedPort <= 0) {
+    throw new Error(`PORT must be a positive integer, received "${rawPort}".`);
+}
+const PORT = parsedPort;
 
 const domains = [
     "apis",
@@ -37,11 +46,12 @@ const domains = [
     "users"
 ];
 
-const PROXY_URL = process.env.PROXY_URL;
-if (!PROXY_URL) {
+const rawProxyUrl = process.env.PROXY_URL;
+if (!rawProxyUrl || !rawProxyUrl.trim()) {
     throw new Error("PROXY_URL environment variable is required for outbound Roblox requests.");
 }
 
+const PROXY_URL = rawProxyUrl.trim();
 const proxyAgent = new HttpsProxyAgent(PROXY_URL);
 
 const toPositiveInteger = (value, fallback) => {
