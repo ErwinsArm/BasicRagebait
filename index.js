@@ -46,8 +46,12 @@ const domains = [
     "users"
 ];
 
+const envKeys = Object.keys(process.env).sort();
+
 const rawProxyUrl = process.env.PROXY_URL;
 if (!rawProxyUrl || !rawProxyUrl.trim()) {
+    console.error("Missing PROXY_URL. Available environment keys:", envKeys.filter((key) => key.includes("PROXY")));
+    console.error("PORT env present:", typeof process.env.PORT === "string");
     throw new Error("PROXY_URL environment variable is required for outbound Roblox requests.");
 }
 
