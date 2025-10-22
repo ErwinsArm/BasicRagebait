@@ -72,7 +72,7 @@ const JOB_CACHE_TTL_MS = toPositiveInteger(process.env.JOB_CACHE_TTL_MS, 2 * ONE
 const JOB_SWEEP_INTERVAL_MS = toPositiveInteger(process.env.JOB_SWEEP_INTERVAL_MS, 15 * 1000);
 const JOB_FETCH_MAX_PAGES = toPositiveInteger(process.env.JOB_FETCH_MAX_PAGES, 100);
 const JOB_POOL_TARGET = toPositiveInteger(process.env.JOB_POOL_TARGET, 500);
-const JOB_MIN_PLAYERS = toPositiveInteger(process.env.JOB_MIN_PLAYERS, 2);
+const JOB_MIN_PLAYERS = toPositiveInteger(process.env.JOB_MIN_PLAYERS, 1);
 const JOB_TOP_UP_THRESHOLD = Math.max(
     1,
     Math.min(
