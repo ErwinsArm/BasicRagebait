@@ -66,13 +66,30 @@ const toPositiveInteger = (value, fallback) => {
     return parsed;
 };
 
+const toBoolean = (value, fallback) => {
+    if (typeof value !== "string") {
+        return fallback;
+    }
+
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
+        return true;
+    }
+    if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+        return false;
+    }
+    return fallback;
+};
+
 const ONE_MINUTE_MS = 60 * 1000;
 const DEFAULT_PLACE_ID = (process.env.DEFAULT_PLACE_ID || "109983668079237").trim();
-const JOB_CACHE_TTL_MS = toPositiveInteger(process.env.JOB_CACHE_TTL_MS, 2 * ONE_MINUTE_MS);
+const JOB_CACHE_TTL_MS_BASE = toPositiveInteger(process.env.JOB_CACHE_TTL_MS, 2 * ONE_MINUTE_MS);
 const JOB_SWEEP_INTERVAL_MS = toPositiveInteger(process.env.JOB_SWEEP_INTERVAL_MS, 15 * 1000);
 const JOB_FETCH_MAX_PAGES = toPositiveInteger(process.env.JOB_FETCH_MAX_PAGES, 100);
 const JOB_POOL_TARGET = toPositiveInteger(process.env.JOB_POOL_TARGET, 500);
 const JOB_MIN_PLAYERS = toPositiveInteger(process.env.JOB_MIN_PLAYERS, 1);
+const JOB_RECYCLE_AFTER_MS = toPositiveInteger(process.env.JOB_RECYCLE_AFTER_MS, 5 * ONE_MINUTE_MS);
+const JOB_SKIP_FULL_SERVERS = toBoolean(process.env.JOB_SKIP_FULL_SERVERS, false);
 const JOB_TOP_UP_THRESHOLD = Math.max(
     1,
     Math.min(
@@ -82,15 +99,66 @@ const JOB_TOP_UP_THRESHOLD = Math.max(
 );
 const ROBLOX_API_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
+const JOB_CACHE_TTL_MS = Math.max(JOB_CACHE_TTL_MS_BASE, JOB_RECYCLE_AFTER_MS);
+
 const jobCache = new Map();
 const inflightFetches = new Map();
+
+const ensureRetiredList = (entry) => {
+    if (entry && !Array.isArray(entry.retiredJobs)) {
+        entry.retiredJobs = [];
+    }
+};
+
+const pruneRetiredJobs = (entry, now) => {
+    if (!entry || !Array.isArray(entry.retiredJobs) || entry.retiredJobs.length === 0) {
+        return;
+    }
+
+    let writeIndex = 0;
+    for (let i = 0; i < entry.retiredJobs.length; i += 1) {
+        const record = entry.retiredJobs[i];
+        if (!record || typeof record.jobId !== "string") {
+            continue;
+        }
+
+        if (record.reservedAt + JOB_RECYCLE_AFTER_MS <= now) {
+            entry.jobIds.delete(record.jobId);
+            continue;
+        }
+
+        entry.retiredJobs[writeIndex] = record;
+        writeIndex += 1;
+    }
+
+    if (writeIndex < entry.retiredJobs.length) {
+        entry.retiredJobs.length = writeIndex;
+    }
+};
+
+const removeRetiredMarker = (entry, jobId) => {
+    if (!entry || !Array.isArray(entry.retiredJobs) || entry.retiredJobs.length === 0) {
+        return;
+    }
+
+    for (let i = entry.retiredJobs.length - 1; i >= 0; i -= 1) {
+        if (entry.retiredJobs[i]?.jobId === jobId) {
+            entry.retiredJobs.splice(i, 1);
+            break;
+        }
+    }
+};
 
 const sweepHandle = setInterval(() => {
     const now = Date.now();
     for (const [placeId, entry] of jobCache.entries()) {
         if (!entry || entry.expiresAt <= now) {
             jobCache.delete(placeId);
+            continue;
         }
+
+        ensureRetiredList(entry);
+        pruneRetiredJobs(entry, now);
     }
 }, JOB_SWEEP_INTERVAL_MS);
 
@@ -171,7 +239,9 @@ const filterServerRecords = (servers, seenJobIds) => {
 
         if (maxPlayers !== null && playing !== null && playing >= maxPlayers) {
             stats.full += 1;
-            continue;
+            if (JOB_SKIP_FULL_SERVERS) {
+                continue;
+            }
         }
 
         filtered.push(server);
@@ -202,7 +272,8 @@ const createCacheEntry = (placeId, servers) => {
         jobIds,
         fetchedAt: now,
         expiresAt: now + JOB_CACHE_TTL_MS,
-        topUpInProgress: false
+        topUpInProgress: false,
+        retiredJobs: []
     };
 };
 
@@ -210,6 +281,8 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
     if (!entry || entry.topUpInProgress) {
         return;
     }
+
+    ensureRetiredList(entry);
 
     if (entry.expiresAt <= Date.now()) {
         return;
@@ -239,6 +312,7 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
                     if (slotsRemaining > 0) {
                         const jobsToAdd = jobs.slice(0, slotsRemaining);
                         for (const job of jobsToAdd) {
+                            removeRetiredMarker(entry, job.jobId);
                             entry.jobs.push(job);
                             entry.jobIds.add(job.jobId);
                         }
@@ -320,12 +394,20 @@ const reserveNextJob = (entry) => {
         return null;
     }
 
+    ensureRetiredList(entry);
+    const now = Date.now();
+    pruneRetiredJobs(entry, now);
+
     const job = entry.jobs.pop();
     if (!job) {
         return null;
     }
 
-    job.reservedAt = Date.now();
+    job.reservedAt = now;
+    entry.retiredJobs.push({
+        jobId: job.jobId,
+        reservedAt: now
+    });
     return job;
 };
 
