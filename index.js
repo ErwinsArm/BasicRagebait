@@ -97,6 +97,7 @@ const JOB_TOP_UP_THRESHOLD = Math.max(
         JOB_POOL_TARGET
     )
 );
+console.warn("Max api pages are: ", JOB_FETCH_MAX_PAGES);
 const ROBLOX_API_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
 const JOB_CACHE_TTL_MS = Math.max(JOB_CACHE_TTL_MS_BASE, JOB_RECYCLE_AFTER_MS);
