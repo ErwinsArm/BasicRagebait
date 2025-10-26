@@ -97,6 +97,10 @@ const JOB_TOP_UP_THRESHOLD = Math.max(
         JOB_POOL_TARGET
     )
 );
+const JOB_DUPLICATE_ALERT_WINDOW_MS = toPositiveInteger(
+    process.env.JOB_DUPLICATE_ALERT_WINDOW_MS,
+    60 * 1000
+);
 console.warn("Max api pages are: ", JOB_FETCH_MAX_PAGES);
 const ROBLOX_API_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
@@ -104,6 +108,7 @@ const JOB_CACHE_TTL_MS = Math.max(JOB_CACHE_TTL_MS_BASE, JOB_RECYCLE_AFTER_MS);
 
 const jobCache = new Map();
 const inflightFetches = new Map();
+const recentReservations = new Map();
 
 const ensureRetiredList = (entry) => {
     if (entry && !Array.isArray(entry.retiredJobs)) {
@@ -160,6 +165,12 @@ const sweepHandle = setInterval(() => {
 
         ensureRetiredList(entry);
         pruneRetiredJobs(entry, now);
+    }
+
+    for (const [jobId, lastSeen] of recentReservations.entries()) {
+        if (now - lastSeen > JOB_DUPLICATE_ALERT_WINDOW_MS) {
+            recentReservations.delete(jobId);
+        }
     }
 }, JOB_SWEEP_INTERVAL_MS);
 
@@ -412,6 +423,23 @@ const reserveNextJob = (entry) => {
     return job;
 };
 
+const recordReservation = (job) => {
+    if (!job || typeof job.jobId !== "string" || typeof job.reservedAt !== "number") {
+        return;
+    }
+
+    const lastSeen = recentReservations.get(job.jobId);
+    if (lastSeen && job.reservedAt - lastSeen <= JOB_DUPLICATE_ALERT_WINDOW_MS) {
+        console.warn("[JobPool] Duplicate reservation detected within window", {
+            jobId: job.jobId,
+            previous: new Date(lastSeen).toISOString(),
+            current: new Date(job.reservedAt).toISOString()
+        });
+    }
+
+    recentReservations.set(job.jobId, job.reservedAt);
+};
+
 const ensureJobPool = async (placeId) => {
     const now = Date.now();
     const cached = jobCache.get(placeId);
@@ -469,6 +497,8 @@ app.get("/jobs/next", async (req, res) => {
             jobCache.delete(rawPlaceId);
             return res.status(503).json({ message: "Job pool depleted, retry shortly." });
         }
+
+        recordReservation(job);
 
         const remaining = countAvailableJobs(entry);
 
