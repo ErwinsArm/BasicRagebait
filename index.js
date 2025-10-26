@@ -101,6 +101,10 @@ const JOB_DUPLICATE_ALERT_WINDOW_MS = toPositiveInteger(
     process.env.JOB_DUPLICATE_ALERT_WINDOW_MS,
     60 * 1000
 );
+const JOB_SERVER_SORT_ORDER = (() => {
+    const raw = (process.env.JOB_SERVER_SORT_ORDER || "Asc").trim().toLowerCase();
+    return raw === "desc" ? "Desc" : "Asc";
+})();
 console.warn("Max api pages are: ", JOB_FETCH_MAX_PAGES);
 const ROBLOX_API_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
@@ -187,7 +191,7 @@ const shuffle = (items) => {
 };
 
 const buildServerUrl = (placeId, cursor) => {
-    const baseUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=Asc&limit=100`;
+    const baseUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=${JOB_SERVER_SORT_ORDER}&limit=100`;
     return cursor ? `${baseUrl}&cursor=${encodeURIComponent(cursor)}` : baseUrl;
 };
 
