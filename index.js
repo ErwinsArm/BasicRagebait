@@ -105,6 +105,7 @@ const JOB_SERVER_SORT_ORDER = (() => {
     const raw = (process.env.JOB_SERVER_SORT_ORDER || "Asc").trim().toLowerCase();
     return raw === "desc" ? "Desc" : "Asc";
 })();
+const LOG_THROTTLE_MS = toPositiveInteger(process.env.LOG_THROTTLE_MS, 5 * 1000);
 console.warn("Max api pages are: ", JOB_FETCH_MAX_PAGES);
 const ROBLOX_API_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
@@ -113,6 +114,36 @@ const JOB_CACHE_TTL_MS = Math.max(JOB_CACHE_TTL_MS_BASE, JOB_RECYCLE_AFTER_MS);
 const jobCache = new Map();
 const inflightFetches = new Map();
 const recentReservations = new Map();
+const throttledLogState = new Map();
+
+const logErrorThrottled = (key, message, details = null) => {
+    const now = Date.now();
+    const state = throttledLogState.get(key);
+
+    if (!state) {
+        throttledLogState.set(key, {
+            lastLog: now,
+            suppressed: 0,
+            lastDetails: details
+        });
+        console.error(message, details ?? undefined);
+        return;
+    }
+
+    if (now - state.lastLog >= LOG_THROTTLE_MS) {
+        const suppressedNote = state.suppressed > 0
+            ? ` (and ${state.suppressed} similar errors)`
+            : "";
+        console.error(`${message}${suppressedNote}`, (details ?? state.lastDetails) ?? undefined);
+        state.lastLog = now;
+        state.suppressed = 0;
+        state.lastDetails = details;
+        return;
+    }
+
+    state.suppressed += 1;
+    state.lastDetails = details;
+};
 
 const ensureRetiredList = (entry) => {
     if (entry && !Array.isArray(entry.retiredJobs)) {
@@ -208,7 +239,7 @@ const requestRobloxServerPage = async (placeId, cursor) => {
 
     if (!response.ok) {
         const bodySnippet = await response.text().catch(() => "<unable to read body>");
-        console.error(`[Roblox] Server fetch failed`, {
+        logErrorThrottled("roblox-fetch-failed", "[Roblox] Server fetch failed", {
             placeId,
             cursor,
             status: response.status,
@@ -350,7 +381,11 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
                 }
             }
         } catch (error) {
-            console.error(`Job pool top-up failed for place ${placeId}:`, error);
+            logErrorThrottled(
+                `jobpool-topup-failed-${placeId}`,
+                `Job pool top-up failed for place ${placeId}`,
+                { error: error instanceof Error ? error.message : String(error) }
+            );
         } finally {
             entry.topUpInProgress = false;
         }
@@ -387,9 +422,11 @@ const primeJobPool = async (placeId) => {
     }
 
     if (!servers.length) {
-        console.error(`[JobPool] Failed to prime pool for place ${placeId}; no eligible servers after ${pages} pages.`, {
-            lastStats
-        });
+        logErrorThrottled(
+            `jobpool-prime-empty-${placeId}`,
+            `[JobPool] Failed to prime pool for place ${placeId}; no eligible servers after ${pages} pages.`,
+            { lastStats }
+        );
         throw new Error("No eligible servers returned by Roblox");
     }
 
