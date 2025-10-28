@@ -106,6 +106,10 @@ const JOB_SERVER_SORT_ORDER = (() => {
     return raw === "desc" ? "Desc" : "Asc";
 })();
 const LOG_THROTTLE_MS = toPositiveInteger(process.env.LOG_THROTTLE_MS, 5 * 1000);
+const ROBLOX_FETCH_WARN_AFTER_MS = toPositiveInteger(
+    process.env.ROBLOX_FETCH_WARN_AFTER_MS,
+    10 * 1000
+);
 console.warn("Max api pages are: ", JOB_FETCH_MAX_PAGES);
 const ROBLOX_API_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
@@ -228,28 +232,41 @@ const buildServerUrl = (placeId, cursor) => {
 
 const requestRobloxServerPage = async (placeId, cursor) => {
     const url = buildServerUrl(placeId, cursor);
-    const response = await fetch(url, {
-        method: "GET",
-        agent: proxyAgent,
-        headers: {
-            "user-agent": ROBLOX_API_USER_AGENT,
-            accept: "application/json"
-        }
-    });
-
-    if (!response.ok) {
-        const bodySnippet = await response.text().catch(() => "<unable to read body>");
-        logErrorThrottled("roblox-fetch-failed", "[Roblox] Server fetch failed", {
+    const warnTimeout = setTimeout(() => {
+        console.warn("[Roblox] Server fetch still pending", {
             placeId,
             cursor,
-            status: response.status,
-            statusText: response.statusText,
-            bodySnippet: bodySnippet.slice(0, 300)
+            url,
+            warnAfterMs: ROBLOX_FETCH_WARN_AFTER_MS
         });
-        throw new Error(`Roblox server fetch failed with status ${response.status}`);
-    }
+    }, ROBLOX_FETCH_WARN_AFTER_MS);
 
-    return response.json();
+    try {
+        const response = await fetch(url, {
+            method: "GET",
+            agent: proxyAgent,
+            headers: {
+                "user-agent": ROBLOX_API_USER_AGENT,
+                accept: "application/json"
+            }
+        });
+
+        if (!response.ok) {
+            const bodySnippet = await response.text().catch(() => "<unable to read body>");
+            logErrorThrottled("roblox-fetch-failed", "[Roblox] Server fetch failed", {
+                placeId,
+                cursor,
+                status: response.status,
+                statusText: response.statusText,
+                bodySnippet: bodySnippet.slice(0, 300)
+            });
+            throw new Error(`Roblox server fetch failed with status ${response.status}`);
+        }
+
+        return response.json();
+    } finally {
+        clearTimeout(warnTimeout);
+    }
 };
 
 const filterServerRecords = (servers, seenJobIds) => {
