@@ -226,7 +226,7 @@ const shuffle = (items) => {
 };
 
 const buildServerUrl = (placeId, cursor) => {
-    const baseUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=${JOB_SERVER_SORT_ORDER}&limit=100`;
+    const baseUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=${JOB_SERVER_SORT_ORDER}&limit=100&excludeFullGames=true`;
     return cursor ? `${baseUrl}&cursor=${encodeURIComponent(cursor)}` : baseUrl;
 };
 
