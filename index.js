@@ -90,6 +90,7 @@ const JOB_POOL_TARGET = toPositiveInteger(process.env.JOB_POOL_TARGET, 500);
 const JOB_MIN_PLAYERS = toPositiveInteger(process.env.JOB_MIN_PLAYERS, 1);
 const JOB_RECYCLE_AFTER_MS = toPositiveInteger(process.env.JOB_RECYCLE_AFTER_MS, 5 * ONE_MINUTE_MS);
 const JOB_SKIP_FULL_SERVERS = toBoolean(process.env.JOB_SKIP_FULL_SERVERS, false);
+const EXCLUDE_FULL_GAMES = toBoolean(process.env.JOB_SKIP_FULL_SERVERS, true);
 const JOB_TOP_UP_THRESHOLD = Math.max(
     1,
     Math.min(
@@ -226,7 +227,7 @@ const shuffle = (items) => {
 };
 
 const buildServerUrl = (placeId, cursor) => {
-    const baseUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=${JOB_SERVER_SORT_ORDER}&limit=100&excludeFullGames=true`;
+    const baseUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=${JOB_SERVER_SORT_ORDER}&limit=100&excludeFullGames=${EXCLUDE_FULL_GAMES}`;
     return cursor ? `${baseUrl}&cursor=${encodeURIComponent(cursor)}` : baseUrl;
 };
 
