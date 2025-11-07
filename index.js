@@ -89,8 +89,7 @@ const JOB_FETCH_MAX_PAGES = toPositiveInteger(process.env.JOB_FETCH_MAX_PAGES, 1
 const JOB_POOL_TARGET = toPositiveInteger(process.env.JOB_POOL_TARGET, 500);
 const JOB_MIN_PLAYERS = toPositiveInteger(process.env.JOB_MIN_PLAYERS, 1);
 const JOB_RECYCLE_AFTER_MS = toPositiveInteger(process.env.JOB_RECYCLE_AFTER_MS, 5 * ONE_MINUTE_MS);
-const JOB_SKIP_FULL_SERVERS = toBoolean(process.env.JOB_SKIP_FULL_SERVERS, false);
-const EXCLUDE_FULL_GAMES = toBoolean(process.env.JOB_SKIP_FULL_SERVERS, true);
+const EXCLUDE_FULL_GAMES = toBoolean(process.env.EXCLUDE_FULL_GAMES, true);
 const JOB_TOP_UP_THRESHOLD = Math.max(
     1,
     Math.min(
@@ -264,7 +263,7 @@ const filterServerRecords = (servers, seenJobIds) => {
 
         if (maxPlayers !== null && playing !== null && playing >= maxPlayers) {
             stats.full += 1;
-            if (JOB_SKIP_FULL_SERVERS) {
+            if (EXCLUDE_FULL_GAMES) {
                 continue;
             }
         }
