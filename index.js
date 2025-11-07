@@ -150,51 +150,6 @@ const logErrorThrottled = (key, message, details = null) => {
     state.lastDetails = details;
 };
 
-const ensureRetiredList = (entry) => {
-    if (entry && !Array.isArray(entry.retiredJobs)) {
-        entry.retiredJobs = [];
-    }
-};
-
-const pruneRetiredJobs = (entry, now) => {
-    if (!entry || !Array.isArray(entry.retiredJobs) || entry.retiredJobs.length === 0) {
-        return;
-    }
-
-    let writeIndex = 0;
-    for (let i = 0; i < entry.retiredJobs.length; i += 1) {
-        const record = entry.retiredJobs[i];
-        if (!record || typeof record.jobId !== "string") {
-            continue;
-        }
-
-        if (record.reservedAt + JOB_RECYCLE_AFTER_MS <= now) {
-            entry.jobIds.delete(record.jobId);
-            continue;
-        }
-
-        entry.retiredJobs[writeIndex] = record;
-        writeIndex += 1;
-    }
-
-    if (writeIndex < entry.retiredJobs.length) {
-        entry.retiredJobs.length = writeIndex;
-    }
-};
-
-const removeRetiredMarker = (entry, jobId) => {
-    if (!entry || !Array.isArray(entry.retiredJobs) || entry.retiredJobs.length === 0) {
-        return;
-    }
-
-    for (let i = entry.retiredJobs.length - 1; i >= 0; i -= 1) {
-        if (entry.retiredJobs[i]?.jobId === jobId) {
-            entry.retiredJobs.splice(i, 1);
-            break;
-        }
-    }
-};
-
 const sweepHandle = setInterval(() => {
     const now = Date.now();
     for (const [placeId, entry] of jobCache.entries()) {
@@ -202,13 +157,10 @@ const sweepHandle = setInterval(() => {
             jobCache.delete(placeId);
             continue;
         }
-
-        ensureRetiredList(entry);
-        pruneRetiredJobs(entry, now);
     }
 
     for (const [jobId, lastSeen] of recentReservations.entries()) {
-        if (now - lastSeen > JOB_DUPLICATE_ALERT_WINDOW_MS) {
+        if (now - lastSeen > JOB_RECYCLE_AFTER_MS) {
             recentReservations.delete(jobId);
         }
     }
@@ -278,8 +230,10 @@ const filterServerRecords = (servers, seenJobIds) => {
         invalid: 0,
         duplicate: 0,
         lowPlayers: 0,
-        full: 0
+        full: 0,
+        recentlyReserved: 0
     };
+    const now = Date.now();
 
     for (const server of servers) {
         stats.total += 1;
@@ -291,6 +245,12 @@ const filterServerRecords = (servers, seenJobIds) => {
 
         if (seenJobIds.has(server.id) || sessionSeen.has(server.id)) {
             stats.duplicate += 1;
+            continue;
+        }
+
+        const lastReserved = recentReservations.get(server.id);
+        if (lastReserved && now - lastReserved < JOB_RECYCLE_AFTER_MS) {
+            stats.recentlyReserved += 1;
             continue;
         }
 
@@ -337,8 +297,7 @@ const createCacheEntry = (placeId, servers) => {
         jobIds,
         fetchedAt: now,
         expiresAt: now + JOB_CACHE_TTL_MS,
-        topUpInProgress: false,
-        retiredJobs: []
+        topUpInProgress: false
     };
 };
 
@@ -346,8 +305,6 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
     if (!entry || entry.topUpInProgress) {
         return;
     }
-
-    ensureRetiredList(entry);
 
     if (entry.expiresAt <= Date.now()) {
         return;
@@ -377,7 +334,6 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
                     if (slotsRemaining > 0) {
                         const jobsToAdd = jobs.slice(0, slotsRemaining);
                         for (const job of jobsToAdd) {
-                            removeRetiredMarker(entry, job.jobId);
                             entry.jobs.push(job);
                             entry.jobIds.add(job.jobId);
                         }
@@ -465,20 +421,15 @@ const reserveNextJob = (entry) => {
         return null;
     }
 
-    ensureRetiredList(entry);
     const now = Date.now();
-    pruneRetiredJobs(entry, now);
 
     const job = entry.jobs.pop();
     if (!job) {
         return null;
     }
 
+    entry.jobIds.delete(job.jobId);
     job.reservedAt = now;
-    entry.retiredJobs.push({
-        jobId: job.jobId,
-        reservedAt: now
-    });
     return job;
 };
 
