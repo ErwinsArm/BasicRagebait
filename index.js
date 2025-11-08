@@ -89,60 +89,46 @@ const JOB_FETCH_MAX_PAGES = toPositiveInteger(process.env.JOB_FETCH_MAX_PAGES, 1
 const JOB_POOL_TARGET = toPositiveInteger(process.env.JOB_POOL_TARGET, 500);
 const JOB_MIN_PLAYERS = toPositiveInteger(process.env.JOB_MIN_PLAYERS, 1);
 const JOB_RECYCLE_AFTER_MS = toPositiveInteger(process.env.JOB_RECYCLE_AFTER_MS, 5 * ONE_MINUTE_MS);
-const DEFAULT_EXCLUDE_FULL_GAMES = toBoolean(process.env.EXCLUDE_FULL_GAMES, true);
-const JOB_TOP_UP_THRESHOLD = Math.max(
-    1,
-    Math.min(
-        toPositiveInteger(process.env.JOB_TOP_UP_THRESHOLD, Math.ceil(JOB_POOL_TARGET * 0.4)),
-        JOB_POOL_TARGET
-    )
-);
-const JOB_DUPLICATE_ALERT_WINDOW_MS = toPositiveInteger(
-    process.env.JOB_DUPLICATE_ALERT_WINDOW_MS,
-    60 * 1000
-);
-const JOB_SERVER_SORT_ORDER = (() => {
-    const raw = (process.env.JOB_SERVER_SORT_ORDER || "Asc").trim().toLowerCase();
-    return raw === "desc" ? "Desc" : "Asc";
-})();
+const JOB_TOP_UP_THRESHOLD = toPositiveInteger(process.env.JOB_TOP_UP_THRESHOLD, Math.ceil(JOB_POOL_TARGET * 0.4));
+const JOB_DUPLICATE_ALERT_WINDOW_MS = toPositiveInteger(process.env.JOB_DUPLICATE_ALERT_WINDOW_MS, 60 * 1000);
 const DEFAULT_SCRAPE_MODE = {
-    sortOrder: JOB_SERVER_SORT_ORDER,
-    excludeFullGames: DEFAULT_EXCLUDE_FULL_GAMES
+    sortOrder: "Asc",
+    excludeFullGames: true
 };
-const parseScrapeModes = (rawValue, fallbackMode) => {
-    const fallbackList = fallbackMode ? [{ ...fallbackMode }] : [];
-    if (typeof rawValue !== "string" || !rawValue.trim()) {
-        return fallbackList;
+// JOB_SCRAPE_MODES example:
+//   [{"sortOrder":"Asc","excludeFullGames":true},{"sortOrder":"Asc","excludeFullGames":false},{"sortOrder":"Desc","excludeFullGames":true}]
+const SCRAPE_MODES = (() => {
+    const raw = typeof process.env.JOB_SCRAPE_MODES === "string" ? process.env.JOB_SCRAPE_MODES.trim() : "";
+    if (!raw) {
+        return [{ ...DEFAULT_SCRAPE_MODE }];
     }
 
     try {
-        const parsed = JSON.parse(rawValue);
+        const parsed = JSON.parse(raw);
         const items = Array.isArray(parsed) ? parsed : [parsed];
         const modes = [];
+
         for (const item of items) {
             if (!item || typeof item !== "object") {
                 continue;
             }
-            const rawSort = typeof item.sortOrder === "string"
-                ? item.sortOrder.trim().toLowerCase()
-                : (fallbackMode?.sortOrder || "asc").toLowerCase();
-            const sortOrder = rawSort === "desc" ? "Desc" : "Asc";
+
+            const sortOrder = typeof item.sortOrder === "string" && item.sortOrder.trim().toLowerCase() === "desc"
+                ? "Desc"
+                : "Asc";
             const excludeFullGames = typeof item.excludeFullGames === "boolean"
                 ? item.excludeFullGames
-                : fallbackMode?.excludeFullGames ?? true;
+                : DEFAULT_SCRAPE_MODE.excludeFullGames;
+
             modes.push({ sortOrder, excludeFullGames });
         }
-        return modes.length ? modes : fallbackList;
+
+        return modes.length ? modes : [{ ...DEFAULT_SCRAPE_MODE }];
     } catch (error) {
-        console.error("[Config] Failed to parse JOB_SCRAPE_MODES JSON, falling back to default mode.", {
-            error: error instanceof Error ? error.message : String(error)
-        });
-        return fallbackList;
+        console.warn("[Config] JOB_SCRAPE_MODES parse failed:", error);
+        return [{ ...DEFAULT_SCRAPE_MODE }];
     }
-};
-// JOB_SCRAPE_MODES example:
-//   [{"sortOrder":"Asc","excludeFullGames":true},{"sortOrder":"Asc","excludeFullGames":false},{"sortOrder":"Desc","excludeFullGames":true}]
-const SCRAPE_MODES = parseScrapeModes(process.env.JOB_SCRAPE_MODES, DEFAULT_SCRAPE_MODE);
+})();
 const getNextScrapeMode = (holder = null) => {
     const modes = SCRAPE_MODES.length ? SCRAPE_MODES : [{ ...DEFAULT_SCRAPE_MODE }];
     if (!holder) {
@@ -234,14 +220,10 @@ const buildServerUrl = (placeId, cursor, mode = DEFAULT_SCRAPE_MODE) => {
 
 const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MODE) => {
     const url = buildServerUrl(placeId, cursor, mode);
+    const label = `${mode?.sortOrder === "Desc" ? "Desc" : "Asc"}`
+        + `/${mode?.excludeFullGames === false ? "include-full" : "exclude-full"}`;
     const warnTimeout = setTimeout(() => {
-        console.warn("[Roblox] Server fetch still pending", {
-            placeId,
-            cursor,
-            mode,
-            url,
-            warnAfterMs: ROBLOX_FETCH_WARN_AFTER_MS
-        });
+        console.warn(`[Roblox] Fetch still pending (${label}) place=${placeId} cursor=${cursor ?? "start"}`);
     }, ROBLOX_FETCH_WARN_AFTER_MS);
 
     try {
@@ -256,11 +238,10 @@ const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MO
 
         if (!response.ok) {
             const bodySnippet = await response.text().catch(() => "<unable to read body>");
-            logErrorThrottled("roblox-fetch-failed", "[Roblox] Server fetch failed", {
+            const message = `[Roblox] Fetch failed (${label}) status=${response.status}`;
+            logErrorThrottled("roblox-fetch-failed", message, {
                 placeId,
                 cursor,
-                mode,
-                status: response.status,
                 statusText: response.statusText,
                 bodySnippet: bodySnippet.slice(0, 300)
             });
@@ -515,7 +496,8 @@ const ensureJobPool = async (placeId) => {
     if (cached && cached.expiresAt > now) {
         const available = countAvailableJobs(cached);
         if (available > 0) {
-            if (available < JOB_TOP_UP_THRESHOLD) {
+            const threshold = Math.max(1, Math.min(JOB_TOP_UP_THRESHOLD, JOB_POOL_TARGET));
+            if (available < threshold) {
                 scheduleJobPoolTopUp(placeId, cached);
             }
             return cached;
