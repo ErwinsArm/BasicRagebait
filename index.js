@@ -700,20 +700,18 @@ const fetchModeBatch = async (placeId, entry, state, target = null) => {
         const payload = await requestRobloxServerPage(placeId, state.cursor ?? undefined, state.mode);
         pages += 1;
 
-        if (!Array.isArray(payload?.data)) {
+        const rawServers = Array.isArray(payload?.data) ? payload.data : [];
+        if (!rawServers.length && payload && typeof payload === "object" && !Array.isArray(payload.data)) {
             logErrorThrottled(
                 "roblox-empty-data",
                 "[Roblox] Server payload missing data array",
                 {
                     placeId,
                     mode: state.mode,
-                    payload: payload && typeof payload === "object" ? Object.keys(payload) : typeof payload
+                    payloadKeys: Object.keys(payload)
                 }
             );
-            throw new Error("Roblox response did not include server data");
         }
-
-        const rawServers = payload.data;
         const { filtered, stats } = filterServerRecords(rawServers, seenJobIds, state.mode);
         if (filtered.length) {
             const jobs = shuffle(filtered.map(buildJobRecord));
