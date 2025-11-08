@@ -389,13 +389,12 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
 
 const primeJobPool = async (placeId) => {
     const seenJobIds = new Set();
-    const servers = [];
     let cursor = null;
     let pages = 0;
     let lastStats = null;
     const modeTracker = { nextModeIndex: 0 };
 
-    while (pages < JOB_FETCH_MAX_PAGES && servers.length < JOB_POOL_TARGET) {
+    while (pages < JOB_FETCH_MAX_PAGES) {
         const mode = getNextScrapeMode(modeTracker);
         const payload = await requestRobloxServerPage(placeId, cursor ?? undefined, mode);
         pages += 1;
@@ -403,15 +402,24 @@ const primeJobPool = async (placeId) => {
         const rawServers = Array.isArray(payload?.data) ? payload.data : [];
         const { filtered, stats } = filterServerRecords(rawServers, seenJobIds, mode);
         lastStats = stats;
+
         if (filtered.length) {
-            servers.push(...filtered);
-        } else {
-            console.warn(`[JobPool] Roblox page yielded zero eligible servers during prime`, {
-                placeId,
-                stats,
-                mode
-            });
+            const entry = createCacheEntry(placeId, filtered, modeTracker);
+            jobCache.set(placeId, entry);
+
+            const nextCursor = payload?.nextPageCursor ?? null;
+            if (nextCursor) {
+                scheduleJobPoolTopUp(placeId, entry, nextCursor, pages);
+            }
+
+            return entry;
         }
+
+        console.warn(`[JobPool] Roblox page yielded zero eligible servers during prime`, {
+            placeId,
+            stats,
+            mode
+        });
 
         cursor = payload?.nextPageCursor ?? null;
         if (!cursor) {
@@ -419,23 +427,12 @@ const primeJobPool = async (placeId) => {
         }
     }
 
-    if (!servers.length) {
-        logErrorThrottled(
-            `jobpool-prime-empty-${placeId}`,
-            `[JobPool] Failed to prime pool for place ${placeId}; no eligible servers after ${pages} pages.`,
-            { lastStats }
-        );
-        throw new Error("No eligible servers returned by Roblox");
-    }
-
-    const entry = createCacheEntry(placeId, servers, modeTracker);
-    jobCache.set(placeId, entry);
-
-    if (cursor) {
-        scheduleJobPoolTopUp(placeId, entry, cursor, pages);
-    }
-
-    return entry;
+    logErrorThrottled(
+        `jobpool-prime-empty-${placeId}`,
+        `[JobPool] Failed to prime pool for place ${placeId}; no eligible servers after ${pages} pages.`,
+        { lastStats }
+    );
+    throw new Error("No eligible servers returned by Roblox");
 };
 
 const countAvailableJobs = (entry) => (!entry ? 0 : entry.jobs.length);
