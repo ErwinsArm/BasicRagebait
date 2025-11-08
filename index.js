@@ -95,6 +95,10 @@ const JOB_RECYCLE_AFTER_MS = toPositiveInteger(process.env.JOB_RECYCLE_AFTER_MS,
 const JOB_TOP_UP_THRESHOLD = toPositiveInteger(process.env.JOB_TOP_UP_THRESHOLD, Math.ceil(JOB_POOL_TARGET * 0.4));
 const JOB_DUPLICATE_ALERT_WINDOW_MS = toPositiveInteger(process.env.JOB_DUPLICATE_ALERT_WINDOW_MS, 60 * 1000);
 const PLAYER_SPAM_WINDOW_MS = 3 * 1000;
+const PLAYER_SPAM_INTERVAL_SECONDS = toPositiveInteger(process.env.PLAYER_SPAM_INTERVAL_SECONDS, 60);
+const PLAYER_COUNTER_WINDOW_MS = PLAYER_SPAM_INTERVAL_SECONDS * 1000;
+const PLAYER_SPAM_THRESHOLD = Math.max(1, toPositiveInteger(process.env.PLAYER_SPAM_THRESHOLD, 20));
+const PLAYER_SPAM_LOG_ENABLED = (process.env.PLAYER_SPAM_LOGS_ENABLED || "true").trim().toLowerCase() === "true";
 const DEFAULT_SCRAPE_MODE = {
     sortOrder: "Asc",
     excludeFullGames: true
@@ -156,6 +160,7 @@ const JOB_CACHE_TTL_MS = Math.max(JOB_CACHE_TTL_MS_BASE, JOB_RECYCLE_AFTER_MS);
 const jobCache = new Map();
 const inflightFetches = new Map();
 const recentReservations = new Map();
+const playerRequestStats = new Map();
 const throttledLogState = new Map();
 
 const logErrorThrottled = (key, message, details = null) => {
