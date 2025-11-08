@@ -76,7 +76,6 @@ const JOB_MIN_PLAYERS = toPositiveInteger(process.env.JOB_MIN_PLAYERS, 1);
 const JOB_RECYCLE_AFTER_MS = toPositiveInteger(process.env.JOB_RECYCLE_AFTER_MS, 5 * ONE_MINUTE_MS);
 const JOB_TOP_UP_THRESHOLD = toPositiveInteger(process.env.JOB_TOP_UP_THRESHOLD, Math.ceil(JOB_POOL_TARGET * 0.4));
 const JOB_DUPLICATE_ALERT_WINDOW_MS = toPositiveInteger(process.env.JOB_DUPLICATE_ALERT_WINDOW_MS, 60 * 1000);
-const PLAYER_SPAM_WINDOW_MS = 3 * 1000;
 const PLAYER_SPAM_INTERVAL_SECONDS = toPositiveInteger(process.env.PLAYER_SPAM_INTERVAL_SECONDS, 60);
 const PLAYER_COUNTER_WINDOW_MS = PLAYER_SPAM_INTERVAL_SECONDS * 1000;
 const PLAYER_SPAM_THRESHOLD = Math.max(1, toPositiveInteger(process.env.PLAYER_SPAM_THRESHOLD, 20));
@@ -145,7 +144,6 @@ const JOB_CACHE_TTL_MS = Math.max(JOB_CACHE_TTL_MS_BASE, JOB_RECYCLE_AFTER_MS);
 const jobCache = new Map();
 const inflightFetches = new Map();
 const recentReservations = new Map();
-const recentPlayerHits = new Map();
 const playerRequestStats = new Map();
 const throttledLogState = new Map();
 
@@ -194,19 +192,12 @@ const sweepHandle = setInterval(() => {
     }
 
     if (PLAYER_SPAM_LOG_ENABLED) {
-        for (const [player, lastSeen] of recentPlayerHits.entries()) {
-            if (now - lastSeen > PLAYER_SPAM_WINDOW_MS) {
-                recentPlayerHits.delete(player);
-            }
-        }
-
         for (const [player, stats] of playerRequestStats.entries()) {
             if (!stats || typeof stats.lastReset !== "number" || now - stats.lastReset > PLAYER_COUNTER_WINDOW_MS) {
                 playerRequestStats.delete(player);
             }
         }
     } else {
-        recentPlayerHits.clear();
         playerRequestStats.clear();
     }
 }, JOB_SWEEP_INTERVAL_MS);
@@ -532,18 +523,6 @@ const recordPlayerHit = (playerName) => {
 
     const normalized = trimmed.length > 50 ? trimmed.slice(0, 50) : trimmed;
     const now = Date.now();
-    const lastSeen = recentPlayerHits.get(normalized);
-
-    if (lastSeen && now - lastSeen <= PLAYER_SPAM_WINDOW_MS) {
-        console.warn("[PlayerSpam] Rapid JobId requests detected", {
-            playerName: normalized,
-            previous: new Date(lastSeen).toISOString(),
-            current: new Date(now).toISOString()
-        });
-    }
-
-    recentPlayerHits.set(normalized, now);
-
     const stat = playerRequestStats.get(normalized);
     if (!stat || now - stat.lastReset > PLAYER_COUNTER_WINDOW_MS) {
         playerRequestStats.set(normalized, { count: 1, lastReset: now });
