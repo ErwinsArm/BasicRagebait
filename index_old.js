@@ -1,4 +1,4 @@
-import express from "express";
+﻿import express from "express";
 import fetch from "node-fetch";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
@@ -76,7 +76,14 @@ const JOB_MIN_PLAYERS = toPositiveInteger(process.env.JOB_MIN_PLAYERS, 1);
 const JOB_RECYCLE_AFTER_MS = toPositiveInteger(process.env.JOB_RECYCLE_AFTER_MS, 5 * ONE_MINUTE_MS);
 const JOB_TOP_UP_THRESHOLD = toPositiveInteger(process.env.JOB_TOP_UP_THRESHOLD, Math.ceil(JOB_POOL_TARGET * 0.4));
 const JOB_DUPLICATE_ALERT_WINDOW_MS = toPositiveInteger(process.env.JOB_DUPLICATE_ALERT_WINDOW_MS, 60 * 1000);
-const PLAYER_SPAM_WINDOW_MS = 3 * 1000;
+const PLAYER_SPAM_INTERVAL_SECONDS = toPositiveInteger(process.env.PLAYER_SPAM_INTERVAL_SECONDS, 60);
+const PLAYER_COUNTER_WINDOW_MS = PLAYER_SPAM_INTERVAL_SECONDS * 1000;
+const PLAYER_SPAM_THRESHOLD = Math.max(1, toPositiveInteger(process.env.PLAYER_SPAM_THRESHOLD, 20));
+const PLAYER_SPAM_LOG_ENABLED = (() => {
+    const raw = (process.env.PLAYER_SPAM_LOGS_ENABLED || "true").trim().toLowerCase();
+    return raw === "false" || raw === "0" ? false : true;
+})();
+const JOB_ALWAYS_SCRAPE = (process.env.JOB_ALWAYS_SCRAPE || "").trim().toLowerCase() === "true";
 const DEFAULT_SCRAPE_MODE = {
     sortOrder: "Asc",
     excludeFullGames: true
@@ -115,15 +122,10 @@ const SCRAPE_MODES = (() => {
         return [{ ...DEFAULT_SCRAPE_MODE }];
     }
 })();
-const getNextScrapeMode = (holder = null) => {
-    const modes = SCRAPE_MODES.length ? SCRAPE_MODES : [{ ...DEFAULT_SCRAPE_MODE }];
-    if (!holder) {
-        return modes[0];
-    }
-
-    const index = Number.isInteger(holder.nextModeIndex) ? holder.nextModeIndex : 0;
-    holder.nextModeIndex = (index + 1) % modes.length;
-    return modes[index];
+const buildModeKey = (mode, index) => {
+    const sort = mode?.sortOrder === "Desc" ? "Desc" : "Asc";
+    const fill = mode?.excludeFullGames === false ? "include" : "exclude";
+    return `${sort}-${fill}-${index}`;
 };
 const LOG_THROTTLE_MS = toPositiveInteger(process.env.LOG_THROTTLE_MS, 5 * 1000);
 const ROBLOX_FETCH_WARN_AFTER_MS = toPositiveInteger(
@@ -138,7 +140,7 @@ const JOB_CACHE_TTL_MS = Math.max(JOB_CACHE_TTL_MS_BASE, JOB_RECYCLE_AFTER_MS);
 const jobCache = new Map();
 const inflightFetches = new Map();
 const recentReservations = new Map();
-const recentPlayerHits = new Map();
+const playerRequestStats = new Map();
 const throttledLogState = new Map();
 
 const logErrorThrottled = (key, message, details = null) => {
@@ -185,10 +187,14 @@ const sweepHandle = setInterval(() => {
         }
     }
 
-    for (const [player, lastSeen] of recentPlayerHits.entries()) {
-        if (now - lastSeen > PLAYER_SPAM_WINDOW_MS) {
-            recentPlayerHits.delete(player);
+    if (PLAYER_SPAM_LOG_ENABLED) {
+        for (const [player, stats] of playerRequestStats.entries()) {
+            if (!stats || typeof stats.lastReset !== "number" || now - stats.lastReset > PLAYER_COUNTER_WINDOW_MS) {
+                playerRequestStats.delete(player);
+            }
         }
+    } else {
+        playerRequestStats.clear();
     }
 }, JOB_SWEEP_INTERVAL_MS);
 
@@ -327,10 +333,20 @@ const buildJobRecord = (server) => ({
     source: "pool"
 });
 
-const createCacheEntry = (placeId, servers, tracker = null) => {
+const createCacheEntry = (placeId) => {
     const now = Date.now();
-    const jobs = shuffle(servers.map(buildJobRecord)).slice(0, JOB_POOL_TARGET);
-    const jobIds = new Set(jobs.map((job) => job.jobId));
+    const jobs = [];
+    const jobIds = new Set();
+    const modeStates = new Map();
+    const modes = SCRAPE_MODES.length ? SCRAPE_MODES : [{ ...DEFAULT_SCRAPE_MODE }];
+
+    modes.forEach((mode, index) => {
+        modeStates.set(buildModeKey(mode, index), {
+            mode,
+            cursor: null,
+            inflight: false
+        });
+    });
 
     return {
         placeId,
@@ -338,126 +354,80 @@ const createCacheEntry = (placeId, servers, tracker = null) => {
         jobIds,
         fetchedAt: now,
         expiresAt: now + JOB_CACHE_TTL_MS,
-        topUpInProgress: false,
-        nextModeIndex: tracker?.nextModeIndex ?? 0
+        modeStates
     };
 };
 
-const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed = 0) => {
-    if (!entry || entry.topUpInProgress) {
+const ensureModeStates = (entry) => {
+    if (!entry) {
+        return;
+    }
+    if (entry.modeStates instanceof Map && entry.modeStates.size > 0) {
         return;
     }
 
-    if (entry.expiresAt <= Date.now()) {
-        return;
-    }
+    const modeStates = new Map();
+    const modes = SCRAPE_MODES.length ? SCRAPE_MODES : [{ ...DEFAULT_SCRAPE_MODE }];
+    modes.forEach((mode, index) => {
+        modeStates.set(buildModeKey(mode, index), {
+            mode,
+            cursor: null,
+            inflight: false
+        });
+    });
+    entry.modeStates = modeStates;
+};
 
-    if (entry.jobs.length >= JOB_POOL_TARGET) {
-        return;
-    }
-
-    entry.topUpInProgress = true;
-
-    (async () => {
-        try {
-            let cursor = seedCursor;
-            let pages = pagesConsumed;
-            const seenJobIds = entry.jobIds;
-
-            while (pages < JOB_FETCH_MAX_PAGES && entry.jobs.length < JOB_POOL_TARGET) {
-                const mode = getNextScrapeMode(entry);
-                const payload = await requestRobloxServerPage(placeId, cursor ?? undefined, mode);
-                pages += 1;
-
-                const rawServers = Array.isArray(payload?.data) ? payload.data : [];
-                const { filtered, stats } = filterServerRecords(rawServers, seenJobIds, mode);
-                if (filtered.length) {
-                    const jobs = shuffle(filtered.map(buildJobRecord));
-                    const slotsRemaining = Math.max(0, JOB_POOL_TARGET - entry.jobs.length);
-                    if (slotsRemaining > 0) {
-                        const jobsToAdd = jobs.slice(0, slotsRemaining);
-                        for (const job of jobsToAdd) {
-                            entry.jobs.push(job);
-                            entry.jobIds.add(job.jobId);
-                        }
-                    }
-                } else {
-                    console.warn(`[JobPool] Roblox page yielded zero eligible servers during top-up`, {
-                        placeId,
-                        stats,
-                        mode
-                    });
-                }
-
-                cursor = payload?.nextPageCursor ?? null;
-                if (!cursor) {
-                    break;
-                }
-
-                if (entry.jobs.length >= JOB_POOL_TARGET) {
-                    break;
-                }
-            }
-        } catch (error) {
-            logErrorThrottled(
-                `jobpool-topup-failed-${placeId}`,
-                `Job pool top-up failed for place ${placeId}`,
-                { error: error instanceof Error ? error.message : String(error) }
-            );
-        } finally {
-            entry.topUpInProgress = false;
+const appendJobsToEntry = (entry, jobRecords) => {
+    let added = 0;
+    for (const job of jobRecords) {
+        if (!job || typeof job.jobId !== "string") {
+            continue;
         }
-    })();
+        if (entry.jobIds.has(job.jobId)) {
+            continue;
+        }
+        entry.jobs.push(job);
+        entry.jobIds.add(job.jobId);
+        added += 1;
+        if (!JOB_ALWAYS_SCRAPE && entry.jobs.length >= JOB_POOL_TARGET) {
+            break;
+        }
+    }
+    return added;
+};
+
+const scheduleJobPoolTopUp = (placeId, entry) => {
+    if (!entry || entry.expiresAt <= Date.now()) {
+        return;
+    }
+    ensureModeStates(entry);
+    for (const state of entry.modeStates.values()) {
+        scheduleModePoolTopUp(placeId, entry, state);
+    }
 };
 
 const primeJobPool = async (placeId) => {
-    const seenJobIds = new Set();
-    const servers = [];
-    let cursor = null;
-    let pages = 0;
-    let lastStats = null;
-    const modeTracker = { nextModeIndex: 0 };
+    const entry = createCacheEntry(placeId);
+    jobCache.set(placeId, entry);
 
-    while (pages < JOB_FETCH_MAX_PAGES && servers.length < JOB_POOL_TARGET) {
-        const mode = getNextScrapeMode(modeTracker);
-        const payload = await requestRobloxServerPage(placeId, cursor ?? undefined, mode);
-        pages += 1;
-
-        const rawServers = Array.isArray(payload?.data) ? payload.data : [];
-        const { filtered, stats } = filterServerRecords(rawServers, seenJobIds, mode);
-        lastStats = stats;
-        if (filtered.length) {
-            servers.push(...filtered);
-        } else {
-            console.warn(`[JobPool] Roblox page yielded zero eligible servers during prime`, {
-                placeId,
-                stats,
-                mode
-            });
-        }
-
-        cursor = payload?.nextPageCursor ?? null;
-        if (!cursor) {
+    for (const state of entry.modeStates.values()) {
+        await primeModePool(placeId, entry, state);
+        if (entry.jobs.length >= JOB_POOL_TARGET) {
             break;
         }
     }
 
-    if (!servers.length) {
+    if (!entry.jobs.length) {
         logErrorThrottled(
             `jobpool-prime-empty-${placeId}`,
-            `[JobPool] Failed to prime pool for place ${placeId}; no eligible servers after ${pages} pages.`,
-            { lastStats }
+            `[JobPool] Failed to prime pool for place ${placeId}; no eligible servers fetched.`,
+            null
         );
         throw new Error("No eligible servers returned by Roblox");
     }
 
-    const entry = createCacheEntry(placeId, servers, modeTracker);
-    jobCache.set(placeId, entry);
-
-    if (cursor) {
-        scheduleJobPoolTopUp(placeId, entry, cursor, pages);
-    }
-
+    scheduleJobPoolTopUp(placeId, entry);
     return entry;
 };
 
@@ -498,6 +468,10 @@ const recordReservation = (job) => {
 };
 
 const recordPlayerHit = (playerName) => {
+    if (!PLAYER_SPAM_LOG_ENABLED) {
+        return;
+    }
+
     if (typeof playerName !== "string") {
         return;
     }
@@ -509,17 +483,20 @@ const recordPlayerHit = (playerName) => {
 
     const normalized = trimmed.length > 50 ? trimmed.slice(0, 50) : trimmed;
     const now = Date.now();
-    const lastSeen = recentPlayerHits.get(normalized);
-
-    if (lastSeen && now - lastSeen <= PLAYER_SPAM_WINDOW_MS) {
-        console.warn("[PlayerSpam] Rapid JobId requests detected", {
-            playerName: normalized,
-            previous: new Date(lastSeen).toISOString(),
-            current: new Date(now).toISOString()
-        });
+    const stat = playerRequestStats.get(normalized);
+    if (!stat || now - stat.lastReset > PLAYER_COUNTER_WINDOW_MS) {
+        playerRequestStats.set(normalized, { count: 1, lastReset: now });
+        return;
     }
 
-    recentPlayerHits.set(normalized, now);
+    stat.count += 1;
+    if (stat.count % PLAYER_SPAM_THRESHOLD === 0) {
+        console.warn("[PlayerSpam] High request volume from player", {
+            playerName: normalized,
+            count: stat.count,
+            windowMs: PLAYER_COUNTER_WINDOW_MS
+        });
+    }
 };
 
 const ensureJobPool = async (placeId) => {
@@ -527,6 +504,7 @@ const ensureJobPool = async (placeId) => {
     const cached = jobCache.get(placeId);
 
     if (cached && cached.expiresAt > now) {
+        ensureModeStates(cached);
         const available = countAvailableJobs(cached);
         if (available > 0) {
             const threshold = Math.max(1, Math.min(JOB_TOP_UP_THRESHOLD, JOB_POOL_TARGET));
@@ -662,3 +640,60 @@ app.all("/:subdomain/*", async (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => console.log(`Proxy running on http://0.0.0.0:${PORT}`));
+const scheduleModePoolTopUp = (placeId, entry, state) => {
+    if (!state || state.inflight) {
+        return;
+    }
+    if (entry.jobs.length >= JOB_POOL_TARGET || entry.expiresAt <= Date.now()) {
+        return;
+    }
+    state.inflight = true;
+    (async () => {
+        try {
+            await fetchModeBatch(placeId, entry, state);
+        } catch (error) {
+            logErrorThrottled(
+                `jobpool-topup-failed-${placeId}-${state.mode?.sortOrder ?? "Asc"}`,
+                `Job pool top-up failed for place ${placeId}`,
+                { error: error instanceof Error ? error.message : String(error) }
+            );
+        } finally {
+            state.inflight = false;
+        }
+    })();
+};
+
+const fetchModeBatch = async (placeId, entry, state, target = null) => {
+    const perModePages = Math.max(1, Math.floor(JOB_FETCH_MAX_PAGES / (entry.modeStates.size || 1)));
+    let pages = 0;
+    let added = 0;
+    const seenJobIds = new Set(entry.jobIds);
+    const desired = target ?? Math.max(1, Math.ceil(JOB_POOL_TARGET / (entry.modeStates.size || 1)));
+
+    while (pages < perModePages && (JOB_ALWAYS_SCRAPE || entry.jobs.length < JOB_POOL_TARGET) && added < desired) {
+        const payload = await requestRobloxServerPage(placeId, state.cursor ?? undefined, state.mode);
+        pages += 1;
+
+        const rawServers = Array.isArray(payload?.data) ? payload.data : [];
+        const { filtered, stats } = filterServerRecords(rawServers, seenJobIds, state.mode);
+        if (filtered.length) {
+            const jobs = shuffle(filtered.map(buildJobRecord));
+            added += appendJobsToEntry(entry, jobs);
+        } else {
+            console.warn(`[JobPool] Roblox page yielded zero eligible servers`, {
+                placeId,
+                stats,
+                mode: state.mode
+            });
+        }
+
+        state.cursor = payload?.nextPageCursor ?? null;
+        if (!state.cursor) {
+            break;
+        }
+    }
+};
+
+const primeModePool = async (placeId, entry, state) => {
+    await fetchModeBatch(placeId, entry, state, Math.max(1, Math.ceil(JOB_POOL_TARGET / (entry.modeStates.size || 1))));
+};
