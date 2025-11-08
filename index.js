@@ -84,6 +84,7 @@ const PLAYER_SPAM_LOG_ENABLED = (() => {
     return raw === "false" || raw === "0" ? false : true;
 })();
 const JOB_ALWAYS_SCRAPE = (process.env.JOB_ALWAYS_SCRAPE || "").trim().toLowerCase() === "true";
+const JOB_PRIME_BATCH_SIZE = Math.max(1, toPositiveInteger(process.env.JOB_PRIME_BATCH_SIZE, 150));
 const DEFAULT_SCRAPE_MODE = {
     sortOrder: "Asc",
     excludeFullGames: true
@@ -230,32 +231,56 @@ const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MO
     try {
         const maxAttempts = 3;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            const response = await fetch(baseUrl, {
-                method: "GET",
-                agent: proxyAgent,
-                headers: {
-                    "user-agent": ROBLOX_API_USER_AGENT,
-                    accept: "application/json"
+            try {
+                const response = await fetch(baseUrl, {
+                    method: "GET",
+                    agent: proxyAgent,
+                    headers: {
+                        "user-agent": ROBLOX_API_USER_AGENT,
+                        accept: "application/json"
+                    }
+                });
+
+                if (response.ok) {
+                    return response.json();
                 }
-            });
 
-            if (response.ok) {
-                return response.json();
-            }
+                const status = response.status;
+                const bodySnippet = await response.text().catch(() => "<unable to read body>");
+                const message = `[Roblox] Fetch failed (${label}) status=${status}`;
+                logErrorThrottled("roblox-fetch-failed", message, {
+                    placeId,
+                    cursor,
+                    statusText: response.statusText,
+                    bodySnippet: bodySnippet.slice(0, 300)
+                });
 
-            const status = response.status;
-            const bodySnippet = await response.text().catch(() => "<unable to read body>");
-            const message = `[Roblox] Fetch failed (${label}) status=${status}`;
-            logErrorThrottled("roblox-fetch-failed", message, {
-                placeId,
-                cursor,
-                statusText: response.statusText,
-                bodySnippet: bodySnippet.slice(0, 300)
-            });
+                const retryable = status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+                if (!retryable || attempt === maxAttempts) {
+                    throw new Error(`Roblox server fetch failed with status ${status}`);
+                }
+            } catch (error) {
+                const isFetchError = Boolean(error && typeof error === "object" && "type" in error);
+                if (!isFetchError) {
+                    throw error;
+                }
 
-            const retryable = status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
-            if (!retryable || attempt === maxAttempts) {
-                throw new Error(`Roblox server fetch failed with status ${status}`);
+                const throttledKey = error?.code === "ERR_STREAM_PREMATURE_CLOSE"
+                    ? "roblox-premature-close"
+                    : "roblox-fetch-error";
+                logErrorThrottled(
+                    throttledKey,
+                    `[Roblox] Fetch error (${label})`,
+                    {
+                        placeId,
+                        cursor,
+                        message: error instanceof Error ? error.message : String(error)
+                    }
+                );
+
+                if (attempt === maxAttempts) {
+                    throw error;
+                }
             }
 
             const backoffMs = 250 + Math.floor(Math.random() * 250);
@@ -695,5 +720,7 @@ const fetchModeBatch = async (placeId, entry, state, target = null) => {
 };
 
 const primeModePool = async (placeId, entry, state) => {
-    await fetchModeBatch(placeId, entry, state, Math.max(1, Math.ceil(JOB_POOL_TARGET / (entry.modeStates.size || 1))));
+    const perModeDesired = Math.max(1, Math.ceil(JOB_POOL_TARGET / (entry.modeStates.size || 1)));
+    const primeTarget = Math.min(perModeDesired, JOB_PRIME_BATCH_SIZE);
+    await fetchModeBatch(placeId, entry, state, primeTarget);
 };
