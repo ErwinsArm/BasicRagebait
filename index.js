@@ -89,11 +89,11 @@ const JOB_FETCH_MAX_PAGES = toPositiveInteger(process.env.JOB_FETCH_MAX_PAGES, 1
 const JOB_POOL_TARGET = toPositiveInteger(process.env.JOB_POOL_TARGET, 500);
 const JOB_MIN_PLAYERS = toPositiveInteger(process.env.JOB_MIN_PLAYERS, 1);
 const JOB_RECYCLE_AFTER_MS = toPositiveInteger(process.env.JOB_RECYCLE_AFTER_MS, 5 * ONE_MINUTE_MS);
-const EXCLUDE_FULL_GAMES = toBoolean(process.env.EXCLUDE_FULL_GAMES, true);
+const DEFAULT_EXCLUDE_FULL_GAMES = toBoolean(process.env.EXCLUDE_FULL_GAMES, true);
 const JOB_TOP_UP_THRESHOLD = Math.max(
     1,
     Math.min(
-        toPositiveInteger(process.env.JOB_TOP_UP_THRESHOLD, Math.ceil(JOB_POOL_TARGET * 0.3)),
+        toPositiveInteger(process.env.JOB_TOP_UP_THRESHOLD, Math.ceil(JOB_POOL_TARGET * 0.4)),
         JOB_POOL_TARGET
     )
 );
@@ -105,6 +105,54 @@ const JOB_SERVER_SORT_ORDER = (() => {
     const raw = (process.env.JOB_SERVER_SORT_ORDER || "Asc").trim().toLowerCase();
     return raw === "desc" ? "Desc" : "Asc";
 })();
+const DEFAULT_SCRAPE_MODE = {
+    sortOrder: JOB_SERVER_SORT_ORDER,
+    excludeFullGames: DEFAULT_EXCLUDE_FULL_GAMES
+};
+const parseScrapeModes = (rawValue, fallbackMode) => {
+    const fallbackList = fallbackMode ? [{ ...fallbackMode }] : [];
+    if (typeof rawValue !== "string" || !rawValue.trim()) {
+        return fallbackList;
+    }
+
+    try {
+        const parsed = JSON.parse(rawValue);
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        const modes = [];
+        for (const item of items) {
+            if (!item || typeof item !== "object") {
+                continue;
+            }
+            const rawSort = typeof item.sortOrder === "string"
+                ? item.sortOrder.trim().toLowerCase()
+                : (fallbackMode?.sortOrder || "asc").toLowerCase();
+            const sortOrder = rawSort === "desc" ? "Desc" : "Asc";
+            const excludeFullGames = typeof item.excludeFullGames === "boolean"
+                ? item.excludeFullGames
+                : fallbackMode?.excludeFullGames ?? true;
+            modes.push({ sortOrder, excludeFullGames });
+        }
+        return modes.length ? modes : fallbackList;
+    } catch (error) {
+        console.error("[Config] Failed to parse JOB_SCRAPE_MODES JSON, falling back to default mode.", {
+            error: error instanceof Error ? error.message : String(error)
+        });
+        return fallbackList;
+    }
+};
+// JOB_SCRAPE_MODES example:
+//   [{"sortOrder":"Asc","excludeFullGames":true},{"sortOrder":"Desc","excludeFullGames":false}]
+const SCRAPE_MODES = parseScrapeModes(process.env.JOB_SCRAPE_MODES, DEFAULT_SCRAPE_MODE);
+const getNextScrapeMode = (holder = null) => {
+    const modes = SCRAPE_MODES.length ? SCRAPE_MODES : [{ ...DEFAULT_SCRAPE_MODE }];
+    if (!holder) {
+        return modes[0];
+    }
+
+    const index = Number.isInteger(holder.nextModeIndex) ? holder.nextModeIndex : 0;
+    holder.nextModeIndex = (index + 1) % modes.length;
+    return modes[index];
+};
 const LOG_THROTTLE_MS = toPositiveInteger(process.env.LOG_THROTTLE_MS, 5 * 1000);
 const ROBLOX_FETCH_WARN_AFTER_MS = toPositiveInteger(
     process.env.ROBLOX_FETCH_WARN_AFTER_MS,
@@ -177,17 +225,20 @@ const shuffle = (items) => {
     return items;
 };
 
-const buildServerUrl = (placeId, cursor) => {
-    const baseUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=${JOB_SERVER_SORT_ORDER}&limit=100&excludeFullGames=${EXCLUDE_FULL_GAMES}`;
+const buildServerUrl = (placeId, cursor, mode = DEFAULT_SCRAPE_MODE) => {
+    const sortOrder = mode?.sortOrder === "Desc" ? "Desc" : "Asc";
+    const excludeFullGames = mode?.excludeFullGames ? "true" : "false";
+    const baseUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?sortOrder=${sortOrder}&limit=100&excludeFullGames=${excludeFullGames}`;
     return cursor ? `${baseUrl}&cursor=${encodeURIComponent(cursor)}` : baseUrl;
 };
 
-const requestRobloxServerPage = async (placeId, cursor) => {
-    const url = buildServerUrl(placeId, cursor);
+const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MODE) => {
+    const url = buildServerUrl(placeId, cursor, mode);
     const warnTimeout = setTimeout(() => {
         console.warn("[Roblox] Server fetch still pending", {
             placeId,
             cursor,
+            mode,
             url,
             warnAfterMs: ROBLOX_FETCH_WARN_AFTER_MS
         });
@@ -208,6 +259,7 @@ const requestRobloxServerPage = async (placeId, cursor) => {
             logErrorThrottled("roblox-fetch-failed", "[Roblox] Server fetch failed", {
                 placeId,
                 cursor,
+                mode,
                 status: response.status,
                 statusText: response.statusText,
                 bodySnippet: bodySnippet.slice(0, 300)
@@ -221,7 +273,7 @@ const requestRobloxServerPage = async (placeId, cursor) => {
     }
 };
 
-const filterServerRecords = (servers, seenJobIds) => {
+const filterServerRecords = (servers, seenJobIds, mode = DEFAULT_SCRAPE_MODE) => {
     const filtered = [];
     const sessionSeen = new Set();
     const stats = {
@@ -233,6 +285,7 @@ const filterServerRecords = (servers, seenJobIds) => {
         recentlyReserved: 0
     };
     const now = Date.now();
+    const skipFullServers = mode?.excludeFullGames !== false;
 
     for (const server of servers) {
         stats.total += 1;
@@ -263,7 +316,7 @@ const filterServerRecords = (servers, seenJobIds) => {
 
         if (maxPlayers !== null && playing !== null && playing >= maxPlayers) {
             stats.full += 1;
-            if (EXCLUDE_FULL_GAMES) {
+            if (skipFullServers) {
                 continue;
             }
         }
@@ -285,7 +338,7 @@ const buildJobRecord = (server) => ({
     source: "pool"
 });
 
-const createCacheEntry = (placeId, servers) => {
+const createCacheEntry = (placeId, servers, tracker = null) => {
     const now = Date.now();
     const jobs = shuffle(servers.map(buildJobRecord)).slice(0, JOB_POOL_TARGET);
     const jobIds = new Set(jobs.map((job) => job.jobId));
@@ -296,7 +349,8 @@ const createCacheEntry = (placeId, servers) => {
         jobIds,
         fetchedAt: now,
         expiresAt: now + JOB_CACHE_TTL_MS,
-        topUpInProgress: false
+        topUpInProgress: false,
+        nextModeIndex: tracker?.nextModeIndex ?? 0
     };
 };
 
@@ -322,11 +376,12 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
             const seenJobIds = entry.jobIds;
 
             while (pages < JOB_FETCH_MAX_PAGES && entry.jobs.length < JOB_POOL_TARGET) {
-                const payload = await requestRobloxServerPage(placeId, cursor ?? undefined);
+                const mode = getNextScrapeMode(entry);
+                const payload = await requestRobloxServerPage(placeId, cursor ?? undefined, mode);
                 pages += 1;
 
                 const rawServers = Array.isArray(payload?.data) ? payload.data : [];
-                const { filtered, stats } = filterServerRecords(rawServers, seenJobIds);
+                const { filtered, stats } = filterServerRecords(rawServers, seenJobIds, mode);
                 if (filtered.length) {
                     const jobs = shuffle(filtered.map(buildJobRecord));
                     const slotsRemaining = Math.max(0, JOB_POOL_TARGET - entry.jobs.length);
@@ -340,7 +395,8 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
                 } else {
                     console.warn(`[JobPool] Roblox page yielded zero eligible servers during top-up`, {
                         placeId,
-                        stats
+                        stats,
+                        mode
                     });
                 }
 
@@ -371,20 +427,23 @@ const primeJobPool = async (placeId) => {
     let cursor = null;
     let pages = 0;
     let lastStats = null;
+    const modeTracker = { nextModeIndex: 0 };
 
     while (pages < JOB_FETCH_MAX_PAGES && servers.length < JOB_POOL_TARGET) {
-        const payload = await requestRobloxServerPage(placeId, cursor ?? undefined);
+        const mode = getNextScrapeMode(modeTracker);
+        const payload = await requestRobloxServerPage(placeId, cursor ?? undefined, mode);
         pages += 1;
 
         const rawServers = Array.isArray(payload?.data) ? payload.data : [];
-        const { filtered, stats } = filterServerRecords(rawServers, seenJobIds);
+        const { filtered, stats } = filterServerRecords(rawServers, seenJobIds, mode);
         lastStats = stats;
         if (filtered.length) {
             servers.push(...filtered);
         } else {
             console.warn(`[JobPool] Roblox page yielded zero eligible servers during prime`, {
                 placeId,
-                stats
+                stats,
+                mode
             });
         }
 
@@ -403,7 +462,7 @@ const primeJobPool = async (placeId) => {
         throw new Error("No eligible servers returned by Roblox");
     }
 
-    const entry = createCacheEntry(placeId, servers);
+    const entry = createCacheEntry(placeId, servers, modeTracker);
     jobCache.set(placeId, entry);
 
     if (cursor) {
