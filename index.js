@@ -203,37 +203,52 @@ const buildServerUrl = (placeId, cursor, mode = DEFAULT_SCRAPE_MODE) => {
     return cursor ? `${baseUrl}&cursor=${encodeURIComponent(cursor)}` : baseUrl;
 };
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MODE) => {
-    const url = buildServerUrl(placeId, cursor, mode);
     const label = `${mode?.sortOrder === "Desc" ? "Desc" : "Asc"}`
         + `/${mode?.excludeFullGames === false ? "include-full" : "exclude-full"}`;
+    const baseUrl = buildServerUrl(placeId, cursor, mode);
     const warnTimeout = setTimeout(() => {
         console.warn(`[Roblox] Fetch still pending (${label}) place=${placeId} cursor=${cursor ?? "start"}`);
     }, ROBLOX_FETCH_WARN_AFTER_MS);
 
     try {
-        const response = await fetch(url, {
-            method: "GET",
-            agent: proxyAgent,
-            headers: {
-                "user-agent": ROBLOX_API_USER_AGENT,
-                accept: "application/json"
-            }
-        });
+        const maxAttempts = 3;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            const response = await fetch(baseUrl, {
+                method: "GET",
+                agent: proxyAgent,
+                headers: {
+                    "user-agent": ROBLOX_API_USER_AGENT,
+                    accept: "application/json"
+                }
+            });
 
-        if (!response.ok) {
+            if (response.ok) {
+                return response.json();
+            }
+
+            const status = response.status;
             const bodySnippet = await response.text().catch(() => "<unable to read body>");
-            const message = `[Roblox] Fetch failed (${label}) status=${response.status}`;
+            const message = `[Roblox] Fetch failed (${label}) status=${status}`;
             logErrorThrottled("roblox-fetch-failed", message, {
                 placeId,
                 cursor,
                 statusText: response.statusText,
                 bodySnippet: bodySnippet.slice(0, 300)
             });
-            throw new Error(`Roblox server fetch failed with status ${response.status}`);
+
+            const retryable = status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+            if (!retryable || attempt === maxAttempts) {
+                throw new Error(`Roblox server fetch failed with status ${status}`);
+            }
+
+            const backoffMs = 250 + Math.floor(Math.random() * 250);
+            await sleep(backoffMs);
         }
 
-        return response.json();
+        throw new Error("Roblox server fetch failed after retries");
     } finally {
         clearTimeout(warnTimeout);
     }
@@ -389,12 +404,13 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
 
 const primeJobPool = async (placeId) => {
     const seenJobIds = new Set();
+    const servers = [];
     let cursor = null;
     let pages = 0;
     let lastStats = null;
     const modeTracker = { nextModeIndex: 0 };
 
-    while (pages < JOB_FETCH_MAX_PAGES) {
+    while (pages < JOB_FETCH_MAX_PAGES && servers.length < JOB_POOL_TARGET) {
         const mode = getNextScrapeMode(modeTracker);
         const payload = await requestRobloxServerPage(placeId, cursor ?? undefined, mode);
         pages += 1;
@@ -402,24 +418,15 @@ const primeJobPool = async (placeId) => {
         const rawServers = Array.isArray(payload?.data) ? payload.data : [];
         const { filtered, stats } = filterServerRecords(rawServers, seenJobIds, mode);
         lastStats = stats;
-
         if (filtered.length) {
-            const entry = createCacheEntry(placeId, filtered, modeTracker);
-            jobCache.set(placeId, entry);
-
-            const nextCursor = payload?.nextPageCursor ?? null;
-            if (nextCursor) {
-                scheduleJobPoolTopUp(placeId, entry, nextCursor, pages);
-            }
-
-            return entry;
+            servers.push(...filtered);
+        } else {
+            console.warn(`[JobPool] Roblox page yielded zero eligible servers during prime`, {
+                placeId,
+                stats,
+                mode
+            });
         }
-
-        console.warn(`[JobPool] Roblox page yielded zero eligible servers during prime`, {
-            placeId,
-            stats,
-            mode
-        });
 
         cursor = payload?.nextPageCursor ?? null;
         if (!cursor) {
@@ -427,12 +434,23 @@ const primeJobPool = async (placeId) => {
         }
     }
 
-    logErrorThrottled(
-        `jobpool-prime-empty-${placeId}`,
-        `[JobPool] Failed to prime pool for place ${placeId}; no eligible servers after ${pages} pages.`,
-        { lastStats }
-    );
-    throw new Error("No eligible servers returned by Roblox");
+    if (!servers.length) {
+        logErrorThrottled(
+            `jobpool-prime-empty-${placeId}`,
+            `[JobPool] Failed to prime pool for place ${placeId}; no eligible servers after ${pages} pages.`,
+            { lastStats }
+        );
+        throw new Error("No eligible servers returned by Roblox");
+    }
+
+    const entry = createCacheEntry(placeId, servers, modeTracker);
+    jobCache.set(placeId, entry);
+
+    if (cursor) {
+        scheduleJobPoolTopUp(placeId, entry, cursor, pages);
+    }
+
+    return entry;
 };
 
 const countAvailableJobs = (entry) => (!entry ? 0 : entry.jobs.length);
