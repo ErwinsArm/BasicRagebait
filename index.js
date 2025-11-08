@@ -83,10 +83,7 @@ const PLAYER_SPAM_LOG_ENABLED = (() => {
     const raw = (process.env.PLAYER_SPAM_LOGS_ENABLED || "true").trim().toLowerCase();
     return raw === "false" || raw === "0" ? false : true;
 })();
-const JOB_ALWAYS_SCRAPE = (() => {
-    const raw = (process.env.JOB_ALWAYS_SCRAPE || "false").trim().toLowerCase();
-    return raw === "true" || raw === "1" || raw === "yes" || raw === "on";
-})();
+const JOB_ALWAYS_SCRAPE = (process.env.JOB_ALWAYS_SCRAPE || "").trim().toLowerCase() === "true";
 const DEFAULT_SCRAPE_MODE = {
     sortOrder: "Asc",
     excludeFullGames: true
