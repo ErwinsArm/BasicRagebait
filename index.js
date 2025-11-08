@@ -667,7 +667,7 @@ const fetchModeBatch = async (placeId, entry, state, target = null) => {
     const perModePages = Math.max(1, Math.floor(JOB_FETCH_MAX_PAGES / (entry.modeStates.size || 1)));
     let pages = 0;
     let added = 0;
-    const seenJobIds = entry.jobIds;
+    const seenJobIds = new Set(entry.jobIds);
     const desired = target ?? Math.max(1, Math.ceil(JOB_POOL_TARGET / (entry.modeStates.size || 1)));
 
     while (pages < perModePages && (JOB_ALWAYS_SCRAPE || entry.jobs.length < JOB_POOL_TARGET) && added < desired) {
