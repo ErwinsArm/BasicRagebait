@@ -48,15 +48,33 @@ const domains = [
 
 const envKeys = Object.keys(process.env).sort();
 
-const rawProxyUrl = process.env.PROXY_URL;
-if (!rawProxyUrl || !rawProxyUrl.trim()) {
-    console.error("Missing PROXY_URL. Available environment keys:", envKeys);
-    console.error("PORT env present:", typeof process.env.PORT === "string");
-    throw new Error("PROXY_URL environment variable is required for outbound Roblox requests.");
+const PROXY_SOURCE_URL = (process.env.PROXY_SOURCE_URL
+    || "https://gist.githubusercontent.com/ErwinsArm/c3983e2bf3ee3e0480019cfb7078fd22/raw/BasicRagebait_proxies.txt"
+).trim();
+
+let proxyList;
+try {
+    const proxyResponse = await fetch(PROXY_SOURCE_URL);
+    if (!proxyResponse.ok) {
+        throw new Error(`HTTP ${proxyResponse.status}`);
+    }
+    const body = await proxyResponse.text();
+    proxyList = body
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+} catch (error) {
+    console.error("Failed to load proxies. Available environment keys:", envKeys);
+    throw new Error(`PROXY_SOURCE_URL fetch failed: ${error instanceof Error ? error.message : String(error)}`);
 }
 
-const PROXY_URL = rawProxyUrl.trim();
-const proxyAgent = new HttpsProxyAgent(PROXY_URL);
+if (!proxyList.length) {
+    throw new Error("PROXY_SOURCE_URL must provide at least one proxy entry.");
+}
+
+const pickProxyUrl = () => proxyList[Math.floor(Math.random() * proxyList.length)];
+const createProxyAgent = () => new HttpsProxyAgent(pickProxyUrl());
+console.info(`[Proxy] Loaded ${proxyList.length} entries from ${PROXY_SOURCE_URL}`);
 
 const toPositiveInteger = (value, fallback) => {
     const parsed = Number.parseInt(value, 10);
@@ -138,7 +156,6 @@ const JOB_CACHE_TTL_MS = Math.max(JOB_CACHE_TTL_MS_BASE, JOB_RECYCLE_AFTER_MS);
 const jobCache = new Map();
 const inflightFetches = new Map();
 const recentReservations = new Map();
-const recentPlayerHits = new Map();
 const throttledLogState = new Map();
 
 const logErrorThrottled = (key, message, details = null) => {
@@ -185,10 +202,14 @@ const sweepHandle = setInterval(() => {
         }
     }
 
-    for (const [player, lastSeen] of recentPlayerHits.entries()) {
-        if (now - lastSeen > PLAYER_SPAM_WINDOW_MS) {
-            recentPlayerHits.delete(player);
+    if (PLAYER_SPAM_LOG_ENABLED) {
+        for (const [player, stats] of playerRequestStats.entries()) {
+            if (!stats || typeof stats.lastReset !== "number" || now - stats.lastReset > PLAYER_COUNTER_WINDOW_MS) {
+                playerRequestStats.delete(player);
+            }
         }
+    } else {
+        playerRequestStats.clear();
     }
 }, JOB_SWEEP_INTERVAL_MS);
 
@@ -227,7 +248,7 @@ const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MO
             try {
                 const response = await fetch(baseUrl, {
                     method: "GET",
-                    agent: proxyAgent,
+                    agent: createProxyAgent(),
                     headers: {
                         "user-agent": ROBLOX_API_USER_AGENT,
                         accept: "application/json"
@@ -676,7 +697,7 @@ app.all("/:subdomain/*", async (req, res) => {
     const init = {
         method: req.method,
         headers,
-        agent: proxyAgent
+        agent: createProxyAgent()
     };
 
     if (req.method !== "GET" && req.method !== "HEAD") {
