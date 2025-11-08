@@ -76,6 +76,7 @@ const JOB_MIN_PLAYERS = toPositiveInteger(process.env.JOB_MIN_PLAYERS, 1);
 const JOB_RECYCLE_AFTER_MS = toPositiveInteger(process.env.JOB_RECYCLE_AFTER_MS, 5 * ONE_MINUTE_MS);
 const JOB_TOP_UP_THRESHOLD = toPositiveInteger(process.env.JOB_TOP_UP_THRESHOLD, Math.ceil(JOB_POOL_TARGET * 0.4));
 const JOB_DUPLICATE_ALERT_WINDOW_MS = toPositiveInteger(process.env.JOB_DUPLICATE_ALERT_WINDOW_MS, 60 * 1000);
+const PLAYER_SPAM_WINDOW_MS = 3 * 1000;
 const DEFAULT_SCRAPE_MODE = {
     sortOrder: "Asc",
     excludeFullGames: true
@@ -137,6 +138,7 @@ const JOB_CACHE_TTL_MS = Math.max(JOB_CACHE_TTL_MS_BASE, JOB_RECYCLE_AFTER_MS);
 const jobCache = new Map();
 const inflightFetches = new Map();
 const recentReservations = new Map();
+const recentPlayerHits = new Map();
 const throttledLogState = new Map();
 
 const logErrorThrottled = (key, message, details = null) => {
@@ -180,6 +182,12 @@ const sweepHandle = setInterval(() => {
     for (const [jobId, lastSeen] of recentReservations.entries()) {
         if (now - lastSeen > JOB_RECYCLE_AFTER_MS) {
             recentReservations.delete(jobId);
+        }
+    }
+
+    for (const [player, lastSeen] of recentPlayerHits.entries()) {
+        if (now - lastSeen > PLAYER_SPAM_WINDOW_MS) {
+            recentPlayerHits.delete(player);
         }
     }
 }, JOB_SWEEP_INTERVAL_MS);
@@ -489,6 +497,31 @@ const recordReservation = (job) => {
     recentReservations.set(job.jobId, job.reservedAt);
 };
 
+const recordPlayerHit = (playerName) => {
+    if (typeof playerName !== "string") {
+        return;
+    }
+
+    const trimmed = playerName.trim();
+    if (!trimmed) {
+        return;
+    }
+
+    const normalized = trimmed.length > 50 ? trimmed.slice(0, 50) : trimmed;
+    const now = Date.now();
+    const lastSeen = recentPlayerHits.get(normalized);
+
+    if (lastSeen && now - lastSeen <= PLAYER_SPAM_WINDOW_MS) {
+        console.warn("[PlayerSpam] Rapid JobId requests detected", {
+            playerName: normalized,
+            previous: new Date(lastSeen).toISOString(),
+            current: new Date(now).toISOString()
+        });
+    }
+
+    recentPlayerHits.set(normalized, now);
+};
+
 const ensureJobPool = async (placeId) => {
     const now = Date.now();
     const cached = jobCache.get(placeId);
@@ -530,6 +563,7 @@ app.get("/", (req, res) => {
 
 app.get("/jobs/next", async (req, res) => {
     const rawPlaceId = (req.query.placeId || DEFAULT_PLACE_ID || "").toString().trim();
+    const playerName = typeof req.query.playerName === "string" ? req.query.playerName : "";
 
     if (!rawPlaceId) {
         return res.status(400).json({ message: "Missing placeId." });
@@ -549,10 +583,11 @@ app.get("/jobs/next", async (req, res) => {
         }
 
         recordReservation(job);
+        recordPlayerHit(playerName);
 
         const remaining = countAvailableJobs(entry);
 
-        return res.json({
+        const responsePayload = {
             jobId: job.jobId,
             placeId: rawPlaceId,
             reservedAt: new Date(job.reservedAt).toISOString(),
@@ -564,7 +599,13 @@ app.get("/jobs/next", async (req, res) => {
             source: job.source,
             poolSize: availableBefore,
             remaining
-        });
+        };
+
+        if (playerName && playerName.trim()) {
+            responsePayload.player = playerName.trim();
+        }
+
+        return res.json(responsePayload);
     } catch (error) {
         console.error("Job reservation error:", error);
         const message = error instanceof Error ? error.message : String(error);
