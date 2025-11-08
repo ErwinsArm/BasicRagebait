@@ -529,6 +529,10 @@ const recordReservation = (job) => {
 };
 
 const recordPlayerHit = (playerName) => {
+    if (!PLAYER_SPAM_LOG_ENABLED) {
+        return;
+    }
+
     if (typeof playerName !== "string") {
         return;
     }
@@ -540,17 +544,20 @@ const recordPlayerHit = (playerName) => {
 
     const normalized = trimmed.length > 50 ? trimmed.slice(0, 50) : trimmed;
     const now = Date.now();
-    const lastSeen = recentPlayerHits.get(normalized);
-
-    if (lastSeen && now - lastSeen <= PLAYER_SPAM_WINDOW_MS) {
-        console.warn("[PlayerSpam] Rapid JobId requests detected", {
-            playerName: normalized,
-            previous: new Date(lastSeen).toISOString(),
-            current: new Date(now).toISOString()
-        });
+    const stat = playerRequestStats.get(normalized);
+    if (!stat || now - stat.lastReset > PLAYER_COUNTER_WINDOW_MS) {
+        playerRequestStats.set(normalized, { count: 1, lastReset: now });
+        return;
     }
 
-    recentPlayerHits.set(normalized, now);
+    stat.count += 1;
+    if (stat.count % PLAYER_SPAM_THRESHOLD === 0) {
+        console.warn("[PlayerSpam] High request volume from player", {
+            playerName: normalized,
+            count: stat.count,
+            windowMs: PLAYER_COUNTER_WINDOW_MS
+        });
+    }
 };
 
 const ensureJobPool = async (placeId) => {
@@ -693,4 +700,6 @@ app.all("/:subdomain/*", async (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => console.log(`Proxy running on http://0.0.0.0:${PORT}`));
+
+
 
