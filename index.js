@@ -66,21 +66,6 @@ const toPositiveInteger = (value, fallback) => {
     return parsed;
 };
 
-const toBoolean = (value, fallback) => {
-    if (typeof value !== "string") {
-        return fallback;
-    }
-
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
-        return true;
-    }
-    if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
-        return false;
-    }
-    return fallback;
-};
-
 const ONE_MINUTE_MS = 60 * 1000;
 const DEFAULT_PLACE_ID = (process.env.DEFAULT_PLACE_ID || "109983668079237").trim();
 const JOB_CACHE_TTL_MS_BASE = toPositiveInteger(process.env.JOB_CACHE_TTL_MS, 2 * ONE_MINUTE_MS);
