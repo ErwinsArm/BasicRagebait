@@ -689,17 +689,31 @@ const scheduleModePoolTopUp = (placeId, entry, state) => {
 };
 
 const fetchModeBatch = async (placeId, entry, state, target = null) => {
-    const perModePages = Math.max(1, Math.floor(JOB_FETCH_MAX_PAGES / (entry.modeStates.size || 1)));
+    const modeCount = entry.modeStates.size || 1;
+    const perModePages = Math.max(1, Math.floor(JOB_FETCH_MAX_PAGES / modeCount));
     let pages = 0;
     let added = 0;
     const seenJobIds = new Set(entry.jobIds);
-    const desired = target ?? Math.max(1, Math.ceil(JOB_POOL_TARGET / (entry.modeStates.size || 1)));
+    const desired = target ?? Math.max(1, Math.ceil(JOB_POOL_TARGET / modeCount));
 
     while (pages < perModePages && (JOB_ALWAYS_SCRAPE || entry.jobs.length < JOB_POOL_TARGET) && added < desired) {
         const payload = await requestRobloxServerPage(placeId, state.cursor ?? undefined, state.mode);
         pages += 1;
 
-        const rawServers = Array.isArray(payload?.data) ? payload.data : [];
+        if (!Array.isArray(payload?.data)) {
+            logErrorThrottled(
+                "roblox-empty-data",
+                "[Roblox] Server payload missing data array",
+                {
+                    placeId,
+                    mode: state.mode,
+                    payload: payload && typeof payload === "object" ? Object.keys(payload) : typeof payload
+                }
+            );
+            throw new Error("Roblox response did not include server data");
+        }
+
+        const rawServers = payload.data;
         const { filtered, stats } = filterServerRecords(rawServers, seenJobIds, state.mode);
         if (filtered.length) {
             const jobs = shuffle(filtered.map(buildJobRecord));
