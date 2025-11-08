@@ -382,11 +382,15 @@ const scheduleJobPoolTopUp = (placeId, entry, seedCursor = null, pagesConsumed =
                         }
                     }
                 } else {
-                    console.warn(`[JobPool] Roblox page yielded zero eligible servers during top-up`, {
-                        placeId,
-                        stats,
-                        mode
-                    });
+                    logErrorThrottled(
+                        `jobpool-zero-topup-${placeId}`,
+                        `[JobPool] Roblox page yielded zero eligible servers during top-up`,
+                        {
+                            placeId,
+                            stats,
+                            mode
+                        }
+                    );
                 }
 
                 cursor = payload?.nextPageCursor ?? null;
@@ -429,11 +433,15 @@ const primeJobPool = async (placeId) => {
         if (filtered.length) {
             servers.push(...filtered);
         } else {
-            console.warn(`[JobPool] Roblox page yielded zero eligible servers during prime`, {
-                placeId,
-                stats,
-                mode
-            });
+            logErrorThrottled(
+                `jobpool-zero-prime-${placeId}`,
+                `[JobPool] Roblox page yielded zero eligible servers during prime`,
+                {
+                    placeId,
+                    stats,
+                    mode
+                }
+            );
         }
 
         cursor = payload?.nextPageCursor ?? null;
@@ -448,7 +456,7 @@ const primeJobPool = async (placeId) => {
             `[JobPool] Failed to prime pool for place ${placeId}; no eligible servers after ${pages} pages.`,
             { lastStats }
         );
-        throw new Error("No eligible servers returned by Roblox");
+        return await primeJobPool(placeId);
     }
 
     const entry = createCacheEntry(placeId, servers, modeTracker);
@@ -457,6 +465,12 @@ const primeJobPool = async (placeId) => {
     if (cursor) {
         scheduleJobPoolTopUp(placeId, entry, cursor, pages);
     }
+
+    console.info("[JobPool] Refilled", {
+        placeId,
+        count: entry.jobs.length,
+        cursorPresent: Boolean(cursor)
+    });
 
     return entry;
 };
