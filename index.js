@@ -224,32 +224,48 @@ const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MO
     try {
         const maxAttempts = 3;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            const response = await fetch(baseUrl, {
-                method: "GET",
-                agent: proxyAgent,
-                headers: {
-                    "user-agent": ROBLOX_API_USER_AGENT,
-                    accept: "application/json"
+            try {
+                const response = await fetch(baseUrl, {
+                    method: "GET",
+                    agent: proxyAgent,
+                    headers: {
+                        "user-agent": ROBLOX_API_USER_AGENT,
+                        accept: "application/json"
+                    }
+                });
+
+                if (response.ok) {
+                    return response.json();
                 }
-            });
 
-            if (response.ok) {
-                return response.json();
-            }
+                const status = response.status;
+                const bodySnippet = await response.text().catch(() => "<unable to read body>");
+                const message = `[Roblox] Fetch failed (${label}) status=${status}`;
+                logErrorThrottled("roblox-fetch-failed", message, {
+                    placeId,
+                    cursor,
+                    statusText: response.statusText,
+                    bodySnippet: bodySnippet.slice(0, 300)
+                });
 
-            const status = response.status;
-            const bodySnippet = await response.text().catch(() => "<unable to read body>");
-            const message = `[Roblox] Fetch failed (${label}) status=${status}`;
-            logErrorThrottled("roblox-fetch-failed", message, {
-                placeId,
-                cursor,
-                statusText: response.statusText,
-                bodySnippet: bodySnippet.slice(0, 300)
-            });
+                const retryableStatus =
+                    status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+                if (!retryableStatus || attempt === maxAttempts) {
+                    throw new Error(`Roblox server fetch failed with status ${status}`);
+                }
+            } catch (error) {
+                const code = typeof error === "object" && error && "code" in error ? error.code : null;
+                const retryableNetwork = code === "ECONNRESET" || code === "ETIMEDOUT";
+                logErrorThrottled("roblox-fetch-error", `[Roblox] Fetch error (${label})`, {
+                    placeId,
+                    cursor,
+                    code,
+                    message: error instanceof Error ? error.message : String(error)
+                });
 
-            const retryable = status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
-            if (!retryable || attempt === maxAttempts) {
-                throw new Error(`Roblox server fetch failed with status ${status}`);
+                if (!retryableNetwork || attempt === maxAttempts) {
+                    throw error instanceof Error ? error : new Error("Roblox fetch failed");
+                }
             }
 
             const backoffMs = 250 + Math.floor(Math.random() * 250);
@@ -261,6 +277,7 @@ const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MO
         clearTimeout(warnTimeout);
     }
 };
+
 
 const filterServerRecords = (servers, seenJobIds, mode = DEFAULT_SCRAPE_MODE) => {
     const filtered = [];
@@ -676,3 +693,4 @@ app.all("/:subdomain/*", async (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => console.log(`Proxy running on http://0.0.0.0:${PORT}`));
+
