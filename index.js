@@ -141,7 +141,7 @@ const parseScrapeModes = (rawValue, fallbackMode) => {
     }
 };
 // JOB_SCRAPE_MODES example:
-//   [{"sortOrder":"Asc","excludeFullGames":true},{"sortOrder":"Desc","excludeFullGames":false}]
+//   [{"sortOrder":"Asc","excludeFullGames":true},{"sortOrder":"Asc","excludeFullGames":false},{"sortOrder":"Desc","excludeFullGames":true}]
 const SCRAPE_MODES = parseScrapeModes(process.env.JOB_SCRAPE_MODES, DEFAULT_SCRAPE_MODE);
 const getNextScrapeMode = (holder = null) => {
     const modes = SCRAPE_MODES.length ? SCRAPE_MODES : [{ ...DEFAULT_SCRAPE_MODE }];
