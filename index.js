@@ -152,6 +152,10 @@ const ROBLOX_FETCH_WARN_AFTER_MS = toPositiveInteger(
     process.env.ROBLOX_FETCH_WARN_AFTER_MS,
     10 * 1000
 );
+const ROBLOX_FETCH_TIMEOUT_MS = toPositiveInteger(
+    process.env.ROBLOX_FETCH_TIMEOUT_MS,
+    20 * 1000
+);
 console.warn("Max api pages are: ", JOB_FETCH_MAX_PAGES);
 const ROBLOX_API_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 
@@ -250,6 +254,8 @@ const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MO
     try {
         const maxAttempts = 3;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            const controller = new AbortController();
+            const timeoutHandle = setTimeout(() => controller.abort(), ROBLOX_FETCH_TIMEOUT_MS);
             try {
                 const response = await fetch(baseUrl, {
                     method: "GET",
@@ -257,8 +263,10 @@ const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MO
                     headers: {
                         "user-agent": ROBLOX_API_USER_AGENT,
                         accept: "application/json"
-                    }
+                    },
+                    signal: controller.signal
                 });
+                clearTimeout(timeoutHandle);
 
                 if (response.ok) {
                     return response.json();
@@ -280,13 +288,17 @@ const requestRobloxServerPage = async (placeId, cursor, mode = DEFAULT_SCRAPE_MO
                     throw new Error(`Roblox server fetch failed with status ${status}`);
                 }
             } catch (error) {
+                clearTimeout(timeoutHandle);
                 const code = typeof error === "object" && error && "code" in error ? error.code : null;
-                const retryableNetwork = code === "ECONNRESET" || code === "ETIMEDOUT";
+                const aborted = error instanceof Error && error.name === "AbortError";
+                const retryableNetwork = aborted || code === "ECONNRESET" || code === "ETIMEDOUT";
                 logErrorThrottled("roblox-fetch-error", `[Roblox] Fetch error (${label})`, {
                     placeId,
                     cursor,
                     code,
-                    message: error instanceof Error ? error.message : String(error)
+                    message: aborted
+                        ? `Request timed out after ${ROBLOX_FETCH_TIMEOUT_MS}ms`
+                        : error instanceof Error ? error.message : String(error)
                 });
 
                 if (!retryableNetwork || attempt === maxAttempts) {
